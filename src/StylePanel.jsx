@@ -7,11 +7,11 @@ const PRESETS = [
   ['시안', { text: '#F2FBFF', accent: '#5CE1FF', outline: '#061018' }],
   ['레드', { text: '#FFFFFF', accent: '#FF5A4E', outline: '#140606' }],
 ];
-const SAMPLE = 'PROJECT ZK 탑뷰 공중 액션 123';
+const SAMPLE = '가나다라 ABC 123';
 
 let catalogCache = null;
 
-function FontPicker({ label, hint, value, onChange, installed, onInstall, busy }) {
+function FontPicker({ label, hint, value, onChange, installed, onInstall, busy, sample }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState('');
   const [korean, setKorean] = useState(true);
@@ -40,7 +40,7 @@ function FontPicker({ label, hint, value, onChange, installed, onInstall, busy }
         <span className={`c ${inst || value.source === 'system' ? 'ok' : 'warn'}`}>{busy ? '설치 중…' : status}</span>
         {!inst && value.source !== 'system' && !busy && <button className="accent sm" onClick={() => onInstall(value.family, value.weight)}>설치</button>}
       </div>
-      <div className="fp-sample" style={{ fontFamily: `${previewFamily}, sans-serif`, fontWeight: inst ? 400 : value.weight }}>{SAMPLE}</div>
+      <div className="fp-sample" style={{ fontFamily: `${previewFamily}, sans-serif`, fontWeight: inst ? 400 : value.weight }}>{sample || SAMPLE}</div>
       {open && (
         <div className="fp-pop">
           <div className="fp-search">
@@ -76,7 +76,7 @@ function FontPicker({ label, hint, value, onChange, installed, onInstall, busy }
   );
 }
 
-export default function StylePanel({ style, setStyle, installed, onInstall, installing }) {
+export default function StylePanel({ style, setStyle, installed, onInstall, installing, sample }) {
   const s = {
     fonts: { sub: { ...DEFAULT_STYLE.fonts.sub, ...(style?.fonts?.sub || {}) }, title: { ...DEFAULT_STYLE.fonts.title, ...(style?.fonts?.title || {}) } },
     colors: { ...DEFAULT_STYLE.colors, ...(style?.colors || {}) },
@@ -102,10 +102,10 @@ export default function StylePanel({ style, setStyle, installed, onInstall, inst
       )}
       <section className="set">
         <h4>폰트</h4>
-        <FontPicker label="자막" hint="나레이션 자막·썸네일 보조 문구" value={s.fonts.sub} installed={installed}
+        <FontPicker sample={sample} label="자막" hint="나레이션 자막·썸네일 보조 문구" value={s.fonts.sub} installed={installed}
           busy={installing[`${s.fonts.sub.family}|${s.fonts.sub.weight}`]}
           onChange={(v) => set('fonts.sub', v)} onInstall={onInstall} />
-        <FontPicker label="제목" hint="타이틀·챕터·엔딩 카드, 썸네일 헤드라인" value={s.fonts.title} installed={installed}
+        <FontPicker sample={sample} label="제목" hint="타이틀·챕터·엔딩 카드, 썸네일 헤드라인" value={s.fonts.title} installed={installed}
           busy={installing[`${s.fonts.title.family}|${s.fonts.title.weight}`]}
           onChange={(v) => set('fonts.title', v)} onInstall={onInstall} />
       </section>

@@ -46,7 +46,7 @@ export default function ThumbInspector({ T, body, editTime, style, fontsList, on
   };
   const applyTemplate = (tpl) => {
     const get = (role) => d.layers.find((y) => y.role === role)?.text;
-    const f = { title: get('title') ?? 'PROJECT ZK', kicker: get('kicker') || '', sub: get('sub') || '', badge: get('badge') || '' };
+    const f = { title: get('title') ?? '', kicker: get('kicker') || '', sub: get('sub') || '', badge: get('badge') || '' };
     T.update((x) => ({ ...x, template: tpl, layers: templateLayers(tpl, f, style) })); T.setSelLayer(null);
   };
   const fontKey = l?.font ? `${l.font.source === 'system' ? 'sys' : 'g'}|${l.font.family}|${l.font.weight}` : '';

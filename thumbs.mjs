@@ -4,6 +4,8 @@ import { spawn } from 'node:child_process';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { resolveStyle } from './shared/layout.js';
+import { projectVars } from './shared/cards.js';
+import { srcPath } from './projects.mjs';
 import { TW, TH, TEMPLATES, templateLayers, draftLabel } from './shared/thumbLayers.js';
 
 export { TEMPLATES };
@@ -75,7 +77,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
   return o;
 }
 
-export function createThumbs({ work, root, ffPath, fontsMap, defaultFont }) {
+export function createThumbs({ work, root, ffPath, fontsMap, defaultFont, project = () => ({}) }) {
   const DIR = path.join(work, 'thumbs');
   const DB = path.join(DIR, 'drafts.json');
   const load = async () => { try { return JSON.parse(await fsp.readFile(DB, 'utf8')); } catch { return []; } };
@@ -102,7 +104,7 @@ export function createThumbs({ work, root, ffPath, fontsMap, defaultFont }) {
 
   async function sample(key, n = 16, width = 640) {
     const s = await script(); const meta = s.meta[key]; const { body } = timeline(meta);
-    const src = path.join(root, path.basename(meta.src));
+    const src = srcPath(meta, root);
     await fsp.mkdir(path.join(DIR, 'cand'), { recursive: true });
     const lo = Math.min(8, body * 0.05), hi = body - 2;
     const out = [];
@@ -123,7 +125,7 @@ export function createThumbs({ work, root, ffPath, fontsMap, defaultFont }) {
     const dir = path.join(DIR, 'still'); await fsp.mkdir(dir, { recursive: true });
     const out = path.join(dir, `${key}_${Math.round(t * 1000)}_${w}.jpg`);
     try { return await fsp.readFile(out); } catch {}
-    const r = await run(ffPath(), ['-y', '-hide_banner', '-loglevel', 'error', '-ss', toSrc(meta, t).toFixed(3), '-i', path.join(root, path.basename(meta.src)),
+    const r = await run(ffPath(), ['-y', '-hide_banner', '-loglevel', 'error', '-ss', toSrc(meta, t).toFixed(3), '-i', srcPath(meta, root),
       '-frames:v', '1', '-vf', `scale=${w}:-2`, '-q:v', '5', out]);
     if (r.code !== 0) throw new Error(r.err.trim().split('\n').slice(-2).join('\n') || '프레임 추출 실패');
     return fsp.readFile(out);
@@ -134,7 +136,7 @@ export function createThumbs({ work, root, ffPath, fontsMap, defaultFont }) {
     const s = await script(); const meta = s.meta[q.key];
     await fsp.mkdir(path.join(DIR, 'bg'), { recursive: true });
     const out = path.join(DIR, 'bg', `${q.key}.jpg`);
-    const r = await run(ffPath(), ['-y', '-hide_banner', '-loglevel', 'error', '-ss', toSrc(meta, +q.t || 0).toFixed(3), '-i', path.join(root, path.basename(meta.src)),
+    const r = await run(ffPath(), ['-y', '-hide_banner', '-loglevel', 'error', '-ss', toSrc(meta, +q.t || 0).toFixed(3), '-i', srcPath(meta, root),
       '-frames:v', '1', '-vf', bgFilter(q), '-q:v', '3', out]);
     if (r.code !== 0) throw new Error(r.err.trim().split('\n').slice(-2).join('\n') || '배경 추출 실패');
     return fsp.readFile(out);
@@ -146,7 +148,7 @@ export function createThumbs({ work, root, ffPath, fontsMap, defaultFont }) {
     const assName = `thumb_${d.id}.ass`;
     await fsp.writeFile(path.join(DIR, assName), layersAss(d, await fontsMap(), defaultFont()), 'utf8');
     const out = path.join(DIR, `${d.id}.png`);
-    const r = await run(ffPath(), ['-y', '-hide_banner', '-loglevel', 'error', '-ss', toSrc(meta, d.t).toFixed(3), '-i', path.join(root, path.basename(meta.src)),
+    const r = await run(ffPath(), ['-y', '-hide_banner', '-loglevel', 'error', '-ss', toSrc(meta, d.t).toFixed(3), '-i', srcPath(meta, root),
       '-frames:v', '1', '-vf', `${bgFilter(d)},subtitles=filename=${assName}:fontsdir=../fonts`, out], { cwd: DIR });
     if (r.code !== 0) throw new Error(r.err.trim().split('\n').slice(-3).join('\n') || '썸네일 렌더 실패');
     return { ...d, png: `${d.id}.png`, rendered: Date.now() };
@@ -157,7 +159,8 @@ export function createThumbs({ work, root, ffPath, fontsMap, defaultFont }) {
     if (Array.isArray(d.layers)) return d;
     const s = await script(); const meta = s.meta[d.key];
     const st = resolveStyle(s.style || {}, {}, defaultFont());
-    const f = { title: d.title ?? 'PROJECT ZK', kicker: d.kicker ?? '탑뷰 공중 액션', sub: d.sub ?? `${meta?.title || ''} 플레이 영상`, badge: d.badge ?? (meta?.date || '') };
+    const v = projectVars(s.project || project(), meta);
+    const f = { title: d.title ?? (v.brand || v.title), kicker: d.kicker ?? v.tagline, sub: d.sub ?? v.subtitle, badge: d.badge ?? v.date };
     const { title, kicker, sub, badge, ...rest } = d;
     return { ...rest, template: d.template || 'magazine', layers: templateLayers(d.template || 'magazine', f, st) };
   }
@@ -191,7 +194,8 @@ export function createThumbs({ work, root, ffPath, fontsMap, defaultFont }) {
   async function save(id, outDir) {
     const list = await load(); const d = list.find((x) => x.id === id); if (!d) throw new Error('초안 없음');
     const dir = path.join(outDir, '썸네일'); await fsp.mkdir(dir, { recursive: true });
-    const name = `ProjectZK_${d.key}_${draftLabel(d).replace(/[\\/:*?"<>|\s]+/g, '_')}_${id.slice(-4)}.png`;
+    const pre = String(project().name || 'thumb').replace(/[\\/:*?"<>|\s]+/g, '');
+    const name = `${pre}_${d.key}_${draftLabel(d).replace(/[\\/:*?"<>|\s]+/g, '_')}_${id.slice(-4)}.png`;
     const dest = path.join(dir, name);
     await fsp.copyFile(path.join(DIR, `${id}.png`), dest);
     return dest;
@@ -216,8 +220,8 @@ export const THUMB_TOOL = {
             offset: { type: 'number', description: '후보 시각 기준 미세 조정(초, -4~4)' },
             template: { type: 'string', enum: Object.keys(TEMPLATES) },
             kicker: { type: 'string', description: '핵심 문구(강조색, 한국어 4~10자 권장)' },
-            sub: { type: 'string', description: '부제 (예: 프로토타입 플레이 영상)' },
-            title: { type: 'string', description: '브랜드 문구, 기본 PROJECT ZK' },
+            sub: { type: 'string', description: '부제 (생략 시 프로젝트 부제 형식)' },
+            title: { type: 'string', description: '큰 제목, 생략 시 프로젝트 브랜드 문구' },
             badge: { type: 'string', description: '날짜/라벨, 생략 가능' },
             zoom: { type: 'number', description: '1.0~1.6 확대' },
             fx: { type: 'number', description: '확대 중심 x (0~1)' },

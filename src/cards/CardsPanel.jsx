@@ -52,7 +52,7 @@ export default function CardsPanel({ C, meta, insts, onFocus, onPlay, setMeta, e
           <N label="페이드 아웃" value={card.fadeOut} onChange={(v) => set({ fadeOut: v })} />
         </div>
         {mine.length > 0 && k !== 'chapter' && <p className="muted sm">편집본 {fmt(mine[0].a)} ~ {fmt(mine[0].b)}</p>}
-        {k === 'intro' && <p className="muted sm">텍스트 변수: <code>{'{date}'}</code> {meta?.date || '—'} · <code>{'{title}'}</code> {meta?.title || '—'}</p>}
+        {k === 'intro' && <p className="muted sm">텍스트 변수: <code>{'{brand}'}</code> <code>{'{tagline}'}</code> <code>{'{subtitle}'}</code>(프로젝트 설정) · <code>{'{title}'}</code> {meta?.title || '—'} · <code>{'{date}'}</code> {meta?.date || '—'}</p>}
       </div>
 
       <div className="cp-sec">

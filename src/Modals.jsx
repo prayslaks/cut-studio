@@ -78,7 +78,7 @@ export function SettingsModal({ keys, setKey, remember, setRemember, ai, setAi, 
   };
   const saveCfg = async () => {
     await j('/api/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ffmpegPath: cfg.ffmpegPath, fontName: cfg.fontName, outDir: cfg.outDir === cfg.videoDir ? '' : cfg.outDir }) });
+      body: JSON.stringify({ ffmpegPath: cfg.ffmpegPath, fontName: cfg.fontName }) });
     setCfgDirty(false); say('내보내기 설정 저장됨', 'ok');
   };
   const setC = (k, v) => { setCfg((c) => ({ ...c, [k]: v })); setCfgDirty(true); };
@@ -135,8 +135,9 @@ export function SettingsModal({ keys, setKey, remember, setRemember, ai, setAi, 
             <input value={cfg.fontName} placeholder={`기본: ${cfg.defaultFont}`} onChange={(e) => setC('fontName', e.target.value)} />
             <span className="muted sm">Pretendard 등 설치된 폰트 이름</span></label>
           <label className="row2"><span>출력 폴더</span>
-            <input value={cfg.outDir} placeholder={cfg.videoDir} onChange={(e) => setC('outDir', e.target.value)} />
-            <button className="ghost" onClick={() => post('/api/open', { path: cfg.outDir || cfg.videoDir }).catch((e) => say(e.message, 'err'))}>열기</button></label>
+            <code className="grow path">{cfg.outDir || '(프로젝트를 열면 표시)'}</code>
+            <button className="ghost" disabled={!cfg.outDir} onClick={() => post('/api/open', { path: cfg.outDir }).catch((e) => say(e.message, 'err'))}>열기</button></label>
+          <p className="hint">출력 폴더는 프로젝트마다 다르며 상단 ‘프로젝트 설정’에서 바꿉니다.</p>
           <div className="paths muted">작업 폴더 <code>{cfg.workDir}</code><br />영상 폴더 <code>{cfg.videoDir}</code></div>
         </>)}
       </section>
@@ -169,8 +170,8 @@ export function ExportModal({ summaries, titles, dirty, onSave, job, onStart, on
   const [ff, setFf] = useState(null);
   const [cfg, setCfg] = useState(null);
   const [opt, setOpt] = useState(() => {
-    try { return { targets: ['A', 'B'], height: 1440, quality: 'standard', encoder: '', tts: true, srt: true, gameVolume: 0.55, endFade: 3, ...JSON.parse(localStorage.getItem('zk.export') || '{}') }; }
-    catch { return { targets: ['A', 'B'], height: 1440, quality: 'standard', encoder: '', tts: true, srt: true, gameVolume: 0.55, endFade: 3 }; }
+    try { return { targets: [], height: 1440, quality: 'standard', encoder: '', tts: true, srt: true, gameVolume: 0.55, endFade: 3, ...JSON.parse(localStorage.getItem('zk.export') || '{}') }; }
+    catch { return { targets: [], height: 1440, quality: 'standard', encoder: '', tts: true, srt: true, gameVolume: 0.55, endFade: 3 }; }
   });
   const [preview, setPreview] = useState(null);
   useEffect(() => { try { localStorage.setItem('zk.export', JSON.stringify(opt)); } catch {} }, [opt]);
@@ -181,8 +182,10 @@ export function ExportModal({ summaries, titles, dirty, onSave, job, onStart, on
       if (r.ok) setOpt((o) => (r.encoders.includes(o.encoder) ? o : { ...o, encoder: PREF.find((e) => r.encoders.includes(e)) || 'libx264' }));
     }).catch((e) => setFf({ ok: false, error: e.message }));
   }, []);
+  const keys = Object.keys(summaries);
+  useEffect(() => { setOpt((o) => { const t = (o.targets || []).filter((k) => keys.includes(k)); return { ...o, targets: t.length ? t : keys }; }); }, [keys.join()]); // eslint-disable-line
   const set = (k, v) => setOpt((o) => ({ ...o, [k]: v }));
-  const toggle = (k) => set('targets', opt.targets.includes(k) ? opt.targets.filter((x) => x !== k) : [...opt.targets, k].sort());
+  const toggle = (k) => set('targets', opt.targets.includes(k) ? opt.targets.filter((x) => x !== k) : keys.filter((x) => x === k || opt.targets.includes(x)));
 
   const running = job && !job.finished;
   const canStart = ff?.ok && ff.libass && opt.targets.length && !running;
@@ -237,7 +240,7 @@ export function ExportModal({ summaries, titles, dirty, onSave, job, onStart, on
       ) : (
         <div className="exp">
           <div className="targets">
-            {['A', 'B'].map((k) => {
+            {keys.map((k) => {
               const s = summaries[k];
               const warn = s.none + s.stale > 0 || s.overlaps > 0;
               return (

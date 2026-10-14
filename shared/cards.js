@@ -3,12 +3,19 @@
 //   anim: { delay(초), dx, dy(시작 위치 오프셋, px), dur(이동 시간), fade(카드 페이드 적용, 기본 true) }
 //   text.alpha: 텍스트 불투명도
 // 스타일 연동 토큰: color '@text' | '@accent' | '@outline', font '@title' | '@sub'
-// 텍스트 변수: 챕터 {num} {kr} {en}, 공통 {date} {title}
+// 텍스트 변수: 챕터 {num} {kr} {en}, 공통 {date} {title} {subtitle} {brand} {tagline} (프로젝트 설정)
 import { lid } from './thumbLayers.js';
 
 export const CW = 2560, CH = 1440;
 export const CARD_KINDS = [['intro', '인트로'], ['chapter', '챕터'], ['end', '엔딩']];
-export const CARD_VARS = { intro: ['{date}', '{title}'], chapter: ['{num}', '{kr}', '{en}', '{date}', '{title}'], end: ['{date}', '{title}'] };
+export const CARD_VARS = { intro: ['{brand}', '{tagline}', '{subtitle}', '{title}', '{date}'], chapter: ['{num}', '{kr}', '{en}', '{brand}', '{title}'], end: ['{brand}', '{title}', '{date}'] };
+
+// 프로젝트·영상 공통 텍스트 변수
+export function projectVars(project = {}, meta = {}) {
+  const title = meta?.title || '';
+  return { brand: project.brand || '', tagline: project.tagline || '', title, date: meta?.date || '',
+    subtitle: String(project.subtitleFormat || '{title}').replace(/\{title\}/g, title) };
+}
 export const COLOR_TOKENS = [['@text', '본문'], ['@accent', '강조'], ['@outline', '어두운']];
 export const FONT_TOKENS = [['@title', '제목 폰트'], ['@sub', '자막 폰트']];
 
@@ -32,10 +39,10 @@ export function defaultCards(meta = {}) {
       enabled: true, start: 0.3, dur: 5.3, fadeIn: 0.5, fadeOut: 0.6,
       layers: [
         Rc({ role: 'dim', alpha: +(1 - 0x70 / 255).toFixed(3) }),
-        T({ role: 'brand', text: 'PROJECT ZK', x: 76, y: 40, size: 300, spacing: -8, shadow: { dist: 6, color: '@outline', alpha: 1 }, anim: A(0, -36, 0.5) }),
+        T({ role: 'brand', text: '{brand}', x: 76, y: 40, size: 300, spacing: -8, shadow: { dist: 6, color: '@outline', alpha: 1 }, anim: A(0, -36, 0.5) }),
         T({ text: '{date}', x: 76, y: 1020, size: 80, shadow: { dist: 4, color: '@outline', alpha: 1 }, anim: A(0.2) }),
-        T({ text: '탑뷰 공중 액션', x: 76, y: 1126, size: 112, color: '@accent', shadow: { dist: 4, color: '@outline', alpha: 1 }, anim: A(0.35) }),
-        T({ text: '{title} 플레이 영상', x: 76, y: 1268, size: 80, shadow: { dist: 4, color: '@outline', alpha: 1 }, anim: A(0.5) }),
+        T({ text: '{tagline}', x: 76, y: 1126, size: 112, color: '@accent', shadow: { dist: 4, color: '@outline', alpha: 1 }, anim: A(0.35) }),
+        T({ text: '{subtitle}', x: 76, y: 1268, size: 80, shadow: { dist: 4, color: '@outline', alpha: 1 }, anim: A(0.5) }),
       ],
     },
     chapter: {
@@ -52,7 +59,7 @@ export function defaultCards(meta = {}) {
       enabled: true, fadeIn: 0.5, fadeOut: 0.5,
       layers: [
         Rc({ role: 'bg', alpha: 1, anim: { delay: 0, dx: 0, dy: 0, dur: 0.4, fade: false } }),
-        T({ text: 'PROJECT ZK', x: 1280, y: 560, anchor: 5, size: 260, spacing: -6, anim: A(0.2) }),
+        T({ text: '{brand}', x: 1280, y: 560, anchor: 5, size: 260, spacing: -6, anim: A(0.2) }),
         T({ text: end[0] || '', x: 1280, y: 760, anchor: 5, size: 56, spacing: 10, color: '@accent', anim: A(0.4) }),
         T({ text: end[1] || '', x: 1280, y: 860, anchor: 5, size: 64, anim: A(0.5) }),
       ],
@@ -69,13 +76,14 @@ export function resolveCards(meta = {}) {
 }
 
 // 타임라인 위 카드 인스턴스 [{ kind, idx, a, b, card, vars }]
-export function cardInstances(cards, { meta = {}, offs = [], body, total }) {
-  const base = { date: meta.date || '', title: meta.title || '' };
+export function cardInstances(cards, { meta = {}, offs = [], body, total, project = {} }) {
+  const base = projectVars(project, meta);
   const out = [];
   const ci = cards.intro;
   if (ci?.enabled) out.push({ kind: 'intro', idx: 0, a: ci.start, b: Math.min(ci.start + ci.dur, body), card: ci, vars: base });
   const cc = cards.chapter;
   if (cc?.enabled) (meta.chapters || []).forEach((c, i) => {
+    if (!c || i >= (meta.segs || []).length || (!String(c.kr ?? '').trim() && !String(c.en ?? '').trim())) return;
     const a = (offs[i] ?? 0) + (i === 0 ? cc.firstOffset : cc.offset);
     out.push({ kind: 'chapter', idx: i, a, b: a + cc.dur, card: cc, vars: { ...base, num: c.num ?? '', kr: c.kr ?? '', en: c.en ?? '' } });
   });

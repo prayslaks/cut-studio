@@ -15,6 +15,9 @@ import { SettingsModal, ExportModal } from './Modals.jsx';
 import { useCards } from './cards/useCards.js';
 import CardsPanel from './cards/CardsPanel.jsx';
 import YoutubePanel from './YoutubePanel.jsx';
+import VideoModal from './project/VideoModal.jsx';
+import ProjectHome from './project/ProjectHome.jsx';
+import ProjectSettings from './project/ProjectSettings.jsx';
 import CardInspector from './cards/CardInspector.jsx';
 import CardEditOverlay from './cards/CardEditOverlay.jsx';
 import { cardInstances, cardFocusTime, newCardText, newCardRect, newCardGrad } from '../shared/cards.js';
@@ -45,8 +48,7 @@ function applyDict(text, rules = []) {
   });
   return out;
 }
-const KEYWORDS = ['Project ZK', 'AWACS', '벌컨', '다트', '레이저', '플레어', '에어브레이크', '부스트', '기총', '미사일',
-  '스트레스', '미니맵', '로드아웃', '공중전함', '에어프레임', '레이더', '록온'];
+
 // 기본 톤 프리셋 (Eleven v3/v4 오디오 태그 — 영어 지시어가 가장 안정적)
 const TONE_PRESETS = [
   ['나레이션', '[narrator]'], ['차분한', '[calm]'], ['자신감 있는', '[confident]'], ['진지한', '[serious]'],
@@ -55,7 +57,6 @@ const TONE_PRESETS = [
 ];
 const parseTags = (s = '') => (s.match(/\[[^\]]+\]/g) || []);
 const DEFAULT_VS = { stability: 0.5, similarity_boost: 0.75, style: 0, use_speaker_boost: true, speed: 1 };
-const TABS = [['A', '초기 빌드'], ['B', '프로토타입']];
 
 async function api(url, { key, ...opt } = {}) {
   const r = await fetch(url, { ...opt, headers: { ...(opt.headers || {}), ...(key ? { 'x-el-key': key } : {}) } });
@@ -77,15 +78,16 @@ function deepMergeObj(a = {}, b = {}) {
   return o;
 }
 
-function Highlight({ text }) {
-  const re = new RegExp(`(${KEYWORDS.map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'g');
-  return text.split(re).map((p, i) => (KEYWORDS.includes(p) ? <em key={i}>{p}</em> : <span key={i}>{p}</span>));
-}
 
-export default function App() {
+const nextNum = (arr) => Math.max(0, ...arr.map((l) => parseInt((/(\d+)$/.exec(l.id) || [])[1], 10)).filter(Number.isFinite)) + 1;
+const nextKey = (s) => { for (const c of 'ABCDEFGHIJKLMNOPQRSTUVWXYZ') if (!s.meta?.[c] && !s[c]) return c; return `V${Date.now().toString(36)}`; };
+
+export default function App({ project }) {
   const [script, setScript] = useState(null);
   const [dirty, setDirty] = useState(false);
-  const [tab, setTab] = useState(() => ls.get('zk.tab', 'A'));
+  const [tab, setTab] = useState(() => ls.get('zk.tab', ''));
+  const [vmodal, setVmodal] = useState(null); // { key, isNew }
+  const [phome, setPhome] = useState(false);
   const [tts, setTts] = useState({});
   const [durs, setDurs] = useState({});
   const [keys, setKeys] = useState(() => ({ el: ls.get('zk.elkey', ''), anthropic: ls.get('zk.ai.key.anthropic', ''), openai: ls.get('zk.ai.key.openai', '') }));
@@ -213,7 +215,9 @@ export default function App() {
     api('/api/fonts').then(setFontsList).catch(() => {});
   }, [refreshTts, say]);
 
-  useEffect(() => { ls.set('zk.tab', tab); }, [tab]);
+  useEffect(() => { if (tab) ls.set('zk.tab', tab); }, [tab]);
+  useEffect(() => { document.title = `${script?.project?.name || project?.name || '프로젝트'} · TTS Studio`; }, [script?.project?.name, project?.name]);
+  useEffect(() => { if (script && !(script.videos || []).includes(tab)) setTab(script.videos?.[0] || ''); }, [script, tab]);
   useEffect(() => { ls.set('zk.side', side); }, [side]);
   useEffect(() => {
     ls.set('zk.elkey', remember && keys.el ? keys.el : null);
@@ -280,7 +284,7 @@ export default function App() {
   const tl = useMemo(() => buildTimeline(meta?.segs, meta?.end_card ?? 4), [meta]);
   bodyRef.current = tl.body;
   const lines = useMemo(() => [...(script?.[tab] || [])].sort((a, b) => a.start - b.start), [script, tab]);
-  const insts = useMemo(() => cardInstances(C.cards, { meta: meta || {}, offs: tl.parts.map((p) => p.off), body: tl.body, total: tl.total }), [C.cards, meta, tl]);
+  const insts = useMemo(() => cardInstances(C.cards, { meta: meta || {}, offs: tl.parts.map((p) => p.off), body: tl.body, total: tl.total, project: script?.project }), [C.cards, meta, tl, script?.project]);
   const setMeta = useCallback((fn) => { setScript((s) => ({ ...s, meta: { ...s.meta, [tab]: fn(s.meta[tab]) } })); setDirty(true); }, [tab]);
 
   // 실제로 TTS에 보낼 텍스트: 발음 입력이 있으면 그것, 없으면 자막에 발음 사전 적용
@@ -349,8 +353,7 @@ export default function App() {
     setScript((s) => ({ ...s, [tab]: s[tab].map((l) => (l.id === id ? { ...l, start } : l)) })); setDirty(true);
   }, [tab]);
   const addLine = () => {
-    const ids = script[tab].map((l) => parseInt(l.id.slice(1), 10)).filter(Number.isFinite);
-    const id = `${tab}${String(Math.max(0, ...ids) + 1).padStart(2, '0')}`;
+    const id = `${tab}${String(nextNum(script[tab])).padStart(2, '0')}`;
     setScript((s) => ({ ...s, [tab]: [...s[tab], { id, start: Math.round(editTime * 10) / 10, text: '' }] }));
     setSel(id); setDirty(true);
   };
@@ -427,7 +430,7 @@ export default function App() {
 
   const runBatch = async (scope, onlyMissing) => {
     if (!preflight()) return;
-    const keys = scope === 'all' ? ['A', 'B'] : [tab];
+    const keys = scope === 'all' ? [...(script.videos || [])] : [tab];
     const targets = keys.flatMap((k) => [...script[k]].sort((a, b) => a.start - b.start).map((l, _, arr) => ({ l, arr })))
       .filter(({ l }) => ttsText(l).trim() && (!onlyMissing || statusOf(l) !== 'ok'));
     if (!targets.length) { say('생성할 대사가 없습니다', 'ok'); return; }
@@ -546,7 +549,7 @@ export default function App() {
 
 
   // ---------- 편집 에이전트 연동 ----------
-  const findLine = (id) => { for (const k of ['A', 'B']) { const l = script?.[k]?.find((x) => x.id === id); if (l) return { k, l }; } return null; };
+  const findLine = (id) => { for (const k of (script?.videos || [])) { const l = script?.[k]?.find((x) => x.id === id); if (l) return { k, l }; } return null; };
 
   const annotate = (ops) => ops.map((op) => {
     if (op.op?.startsWith('card')) {
@@ -626,9 +629,8 @@ export default function App() {
         } else if (op.op === 'delete' && k) {
           n[k] = n[k].filter((l) => l.id !== op.id);
         } else if (op.op === 'add') {
-          const t = op.tab === 'A' || op.tab === 'B' ? op.tab : tab;
-          const ids = n[t].map((l) => parseInt(l.id.slice(1), 10)).filter(Number.isFinite);
-          const id = `${t}${String(Math.max(0, ...ids) + 1).padStart(2, '0')}`;
+          const t = (script.videos || []).includes(op.tab) ? op.tab : tab;
+          const id = `${t}${String(nextNum(n[t])).padStart(2, '0')}`;
           n[t] = [...n[t], { id, start: Math.round((+op.start || 0) * 10) / 10, text: op.text || '', ...(op.tts ? { tts: op.tts } : {}) }];
         } else if (op.op === 'rule_add' && op.from) {
           n.pronunciation = [...n.pronunciation.filter((r) => r.from !== op.from), { from: op.from, to: op.to ?? '' }];
@@ -669,7 +671,10 @@ export default function App() {
 
   const buildContext = () => {
     const common = [
-      '당신은 ProjectZK(탑뷰 시점 공중 액션 슈팅 게임, 개인 게임 개발자의 포트폴리오) 홍보 영상 제작 도구에 내장된 어시스턴트다. 사용자는 대사·TTS → 자막 스타일 → 썸네일 → MP4 내보내기 과정을 이 도구로 진행한다.',
+      '당신은 영상 나레이션·자막·썸네일 제작 도구에 내장된 어시스턴트다. 사용자는 대사·TTS → 자막 스타일 → 카드 → 썸네일 → 업로드 문구 → MP4 내보내기 과정을 이 도구로 진행한다.',
+      `프로젝트: ${script.project?.name || ''} (브랜드 문구 ${script.project?.brand || '-'}, 대표 키워드 ${script.project?.tagline || '-'})`,
+      script.project?.brief ? `프로젝트 설명·톤(사용자 작성, 사실의 근거로 사용): ${script.project.brief}` : '프로젝트 설명 없음 — 영상·대본에서 확인되는 것만 말할 것.',
+      `프로젝트 영상: ${(script.videos || []).map((k) => `${k}=${script.meta?.[k]?.title || ''}`).join(', ')}`,
       `현재 사용자가 보고 있는 작업: ${{ lines: '대사/나레이션 편집', style: '자막 스타일 편집', cards: '영상 카드(인트로·챕터·엔딩) 편집', thumbs: '썸네일 편집', youtube: '유튜브 업로드 제목·설명·태그 작성(업로드 탭에 전용 AI 추천 버튼 있음)' }[side]}. 질문이 다른 작업에 관한 것이어도 도와준다.`,
       '변경은 반드시 propose_edits 도구로 제안한다(사용자가 항목별 적용). 설명은 한국어로 짧게. 과장·확인 안 된 사실 단정 금지.',
       `현재 자막 스타일: ${JSON.stringify({ fonts: clientStyle.fonts, colors: clientStyle.colors, sub: clientStyle.sub })}`,
@@ -704,7 +709,7 @@ export default function App() {
     }
     if (side === 'style') {
       return [...common,
-        '자막 스타일 규칙: 자막은 2560x1440 기준 크기. 썸네일(캔바: 흰 굵은 PROJECT ZK, 라임 #DCF884 강조, 어두운 #080C0F)과 톤을 맞추는 것이 목표. 게임 HUD(하단 무장 슬롯)를 가리지 않도록 아래 여백(marginV) 유지.',
+        '자막 스타일 규칙: 자막은 2560x1440 기준 크기. 썸네일·카드와 톤을 맞추고, 영상 하단의 중요한 정보(UI·HUD 등)를 가리지 않도록 아래 여백(marginV)을 조절.',
         '이미지가 첨부되면 현재 영상 화면(자막 미리보기 없음)이다.',
       ].join('\n');
     }
@@ -721,7 +726,7 @@ export default function App() {
     });
     const act = lines.find((l) => editTime >= l.start && editTime < l.start + durOf(l) + SUB_TAIL);
     return [
-      '나레이션 톤: 개발자가 자신이 구현한 시스템을 담백하게 소개하는 톤(화면/대본에서 알 수 없는 시스템은 추측이라고 밝힐 것).',
+      '나레이션 톤: 프로젝트 설명의 톤을 따른다. 화면/대본에서 알 수 없는 내용은 단정하지 말고 추측이라고 밝힐 것.',
       '대사 편집 규칙 (op=update/add/delete/rule_add/rule_remove)',
       '- text = 화면 자막(표기 그대로, 영어 고유명사 허용). 한 줄 약 30자, 최대 2줄 권장.',
       '- tts = TTS 발음 텍스트. 비어 있으면 발음 사전이 자막에 적용된 값이 쓰인다. 반복되는 표기는 rule_add로 사전에 넣고, 한 줄만 다른 경우에만 tts를 쓴다. tts를 자동으로 되돌리려면 빈 문자열.',
@@ -730,13 +735,13 @@ export default function App() {
       '- 한국어 TTS는 약 초당 7자. 대사 end + 0.3초 < 다음 대사 start 가 되도록. start는 편집본 기준 초(0.1 단위).',
       `- 편집본 길이 ${tl.total.toFixed(1)}초, ${tl.body.toFixed(1)}초부터 엔딩 카드(검은 화면). 첫 5.6초는 타이틀 카드가 화면을 덮는다.`,
       '',
-      `현재 영상: ${tab} = ${meta?.title} 플레이 영상`,
-      chapters.length ? `챕터(편집본 시각): ${JSON.stringify(chapters)}` : '챕터 없음(단일 스테이지 플레이)',
+      `현재 영상: ${tab} = ${meta?.title}`,
+      chapters.length ? `챕터(편집본 시각): ${JSON.stringify(chapters)}` : '챕터 없음',
       `재생 위치: ${editTime.toFixed(1)}초${act ? `, 현재 자막 ${act.id}` : ''}${sel ? `, 선택된 대사 ${sel}` : ''}`,
       `발음 사전: ${JSON.stringify(script.pronunciation || [])}`,
-      `다른 영상(${tab === 'A' ? 'B' : 'A'}) 대사 id들: ${(script[tab === 'A' ? 'B' : 'A'] || []).map((l) => l.id).join(', ')} (요청 시에만 수정)`,
+      ...(script.videos || []).filter((k) => k !== tab).map((k) => `다른 영상 ${k}(${script.meta?.[k]?.title || ''}) 대사 id들: ${(script[k] || []).map((l) => l.id).join(', ')} (요청 시에만 수정)`),
       `대사 목록: ${JSON.stringify(L)}`,
-      '사용자 메시지에 이미지가 있으면 그것은 현재 재생 위치의 게임 화면이다.',
+      '사용자 메시지에 이미지가 있으면 그것은 현재 재생 위치의 영상 화면이다.',
     ].join('\n');
   };
 
@@ -760,23 +765,35 @@ export default function App() {
   const cancelExport = async () => { if (exportJob?.id) await api(`/api/export/${exportJob.id}/cancel`, { method: 'POST' }).catch(() => {}); };
 
   // ---------- 렌더 ----------
-  if (!script) return <div className="boot">대본 불러오는 중… <small>{log[0]?.msg}</small></div>;
+  if (!script) return <div className="boot">프로젝트 불러오는 중… <small>{log[0]?.msg}</small></div>;
 
-  const active = lines.find((l) => editTime >= l.start && editTime < l.start + durOf(l) + SUB_TAIL);
-  const inEnd = editTime >= tl.body;
-  const chapter = (meta?.chapters || []).map((c, i) => ({ ...c, at: tl.parts[i]?.off ?? 0 }))
-    .filter((c) => editTime >= c.at && editTime < c.at + 6).pop();
-  const counts = lines.reduce((m, l) => { const s = statusOf(l); m[s] = (m[s] || 0) + 1; return m; }, {});
-  const todoChars = lines.filter((l) => statusOf(l) !== 'ok').reduce((n, l) => n + sendText(l).length, 0);
-  const caps = modelCaps(script.voice.model_id);
-  const modelList = models.some((m) => m.model_id === script.voice.model_id) ? models
-    : [{ model_id: script.voice.model_id, name: script.voice.model_id }, ...models];
-  const voiceName = voices.find((v) => v.voice_id === script.voice.voice_id)?.name;
-
-  return (
-    <div className="app">
+  // ---- 영상 추가·설정·삭제 ----
+  const saveVideo = async (m, key) => {
+    const isNew = !key; const k = key || nextKey(script);
+    const next = { ...script, meta: { ...script.meta, [k]: { ...(script.meta[k] || {}), ...m } }, videos: isNew ? [...script.videos, k] : script.videos, [k]: script[k] || [] };
+    setScript(next); setVmodal(null); setTab(k);
+    try { await save(next); say(isNew ? `영상 추가: ${m.title}` : `영상 설정 저장: ${m.title}`, 'ok'); } catch (e) { say(e.message, 'err'); }
+  };
+  const deleteVideo = async (k) => {
+    const { [k]: _l, ...rest } = script; const { [k]: _m, ...meta2 } = script.meta;
+    const next = { ...rest, meta: meta2, videos: script.videos.filter((x) => x !== k) };
+    setScript(next); setVmodal(null); setTab(next.videos[0] || '');
+    try { await save(next); say('영상을 프로젝트에서 뺐습니다', 'ok'); } catch (e) { say(e.message, 'err'); }
+  };
+  const setProject = (patch) => { setScript((x) => ({ ...x, project: { ...(x.project || {}), ...patch } })); setDirty(true); };
+  const projectModals = (<>
+    {vmodal && <VideoModal vkey={vmodal.key} meta={vmodal.key ? script.meta[vmodal.key] : null} isNew={!!vmodal.isNew} say={say}
+      onSave={(m) => saveVideo(m, vmodal.isNew ? null : vmodal.key)} onDelete={() => deleteVideo(vmodal.key)} onClose={() => setVmodal(null)} />}
+    {phome && <ProjectHome asModal onClose={() => setPhome(false)} />}
+    {modal === 'project' && <ProjectSettings project={script.project || {}} onChange={setProject} dirty={dirty} onSave={() => save()} onClose={() => setModal(null)} say={say} />}
+  </>);
+  const headerEl = (
       <header>
-        <div className="brand"><b>PROJECT ZK</b><span>TTS STUDIO</span></div>
+        <div className="brand">
+          <button className="projbtn" title="프로젝트 전환·새로 만들기" onClick={() => setPhome(true)}><b>{script.project?.name || project?.name || '프로젝트'}</b><i>▾</i></button>
+          <span>TTS STUDIO</span>
+          <button className="ghost sm" title="프로젝트 설정 (브랜드 문구·설명·출력 폴더)" onClick={() => setModal('project')}>프로젝트 설정</button>
+        </div>
         <div className="cred">
           {quota && <span className="quota" title="ElevenLabs 사용량">TTS {quota.used?.toLocaleString()} / {quota.limit?.toLocaleString()}자</span>}
           {!apiKey && <button className="accent" onClick={() => setModal('settings')}>API 키 등록 필요</button>}
@@ -793,15 +810,48 @@ export default function App() {
           </button>
         </div>
       </header>
+  );
+  if (!script.videos?.length || !meta) {
+    return (
+      <div className="app">
+        {headerEl}
+        <div className="empty-proj">
+          <h2>{script.project?.name}</h2>
+          <p className="muted">아직 영상이 없습니다. 작업할 영상을 추가하세요. 원본 파일은 복사하지 않고 그 위치를 그대로 씁니다.</p>
+          <button className="primary" onClick={() => setVmodal({ isNew: true })}>＋ 영상 추가</button>
+        </div>
+        {projectModals}
+        {modal === 'settings' && <SettingsModal keys={keys} setKey={setKey} remember={remember} setRemember={setRemember} ai={ai} setAi={setAiCfg}
+          onTestEl={() => loadVoices(true)} onClose={() => setModal(null)} say={say} log={log} clearLog={() => setLog([])} focus={setFocus} />}
+      </div>
+    );
+  }
+
+  const active = lines.find((l) => editTime >= l.start && editTime < l.start + durOf(l) + SUB_TAIL);
+  const inEnd = editTime >= tl.body;
+  const chapter = (meta?.chapters || []).map((c, i) => ({ ...c, at: tl.parts[i]?.off ?? 0 }))
+    .filter((c) => editTime >= c.at && editTime < c.at + 6).pop();
+  const counts = lines.reduce((m, l) => { const s = statusOf(l); m[s] = (m[s] || 0) + 1; return m; }, {});
+  const todoChars = lines.filter((l) => statusOf(l) !== 'ok').reduce((n, l) => n + sendText(l).length, 0);
+  const caps = modelCaps(script.voice.model_id);
+  const modelList = models.some((m) => m.model_id === script.voice.model_id) ? models
+    : [{ model_id: script.voice.model_id, name: script.voice.model_id }, ...models];
+  const voiceName = voices.find((v) => v.voice_id === script.voice.voice_id)?.name;
+
+  return (
+    <div className="app">
+      {headerEl}
 
       <div className="layout" style={{ gridTemplateColumns: `minmax(380px, 1fr) 6px ${lay.mid}px ${asstOpen ? `6px ${lay.asst}px` : '44px'}` }}>
         <section className="left">
           <nav className="tabs">
-            {TABS.map(([k, n]) => (
-              <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)}>
-                {n}<small>{script[k].length}</small>
+            {script.videos.map((k) => (
+              <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)} onDoubleClick={() => setVmodal({ key: k })} title="더블클릭: 영상 설정">
+                {script.meta[k]?.title || k}<small>{(script[k] || []).length}</small>
+                {tab === k && <i className="vset" title="영상 설정 (파일·구간·챕터)" onClick={(e) => { e.stopPropagation(); setVmodal({ key: k }); }}>⚙</i>}
               </button>
             ))}
+            <button className="addvid" title="영상 추가" onClick={() => setVmodal({ isNew: true })}>＋ 영상</button>
             <span className="grow" />
             <span className="len">편집본 {fmt(tl.total)}</span>
           </nav>
@@ -939,7 +989,7 @@ export default function App() {
             <button className={side === 'youtube' ? 'on' : ''} onClick={() => setSide('youtube')} title="유튜브 업로드용 제목·설명·태그">업로드</button>
           </nav>
           {side === 'style' ? (
-            <div className="sidescroll"><StylePanel style={script.style} setStyle={setStyle} installed={fontsList} onInstall={installFont} installing={installing} /></div>
+            <div className="sidescroll"><StylePanel sample={`${script.project?.brand || ''} ${script.project?.tagline || ''} 가나다 123`.trim()} style={script.style} setStyle={setStyle} installed={fontsList} onInstall={installFont} installing={installing} /></div>
           ) : side === 'youtube' ? (
             <YoutubePanel meta={meta} setMeta={setMeta} tl={tl} tab={tab} ai={ai} aiKey={keys[ai.provider]} onOpenSettings={() => setModal('settings')}
               thumbs={T.list} say={say} ensureSaved={async () => { if (dirty) await save(); }} />
@@ -1041,11 +1091,12 @@ export default function App() {
           log={log} clearLog={() => { setLog([]); setUnreadErr(0); }} focus={setFocus} />
       )}
       {modal === 'export' && (
-        <ExportModal summaries={{ A: summaryOf('A'), B: summaryOf('B') }}
-          titles={{ A: `${script.meta?.A?.title || 'A'} 플레이 영상`, B: `${script.meta?.B?.title || 'B'} 플레이 영상` }}
+        <ExportModal summaries={Object.fromEntries(script.videos.map((k) => [k, summaryOf(k)]))}
+          titles={Object.fromEntries(script.videos.map((k) => [k, script.meta[k]?.title || k]))}
           dirty={dirty} onSave={() => save()} job={exportJob} onStart={startExport} onCancel={cancelExport}
           onClose={() => setModal(null)} say={say} />
       )}
+      {projectModals}
     </div>
   );
 }

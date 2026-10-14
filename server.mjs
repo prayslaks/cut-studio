@@ -12,26 +12,59 @@ import { exec, spawn } from 'node:child_process';
 import { checkFfmpeg, startExport, getJob, cancelJob, renderFrame, ENCODERS } from './export.mjs';
 import { createFonts } from './fonts.mjs';
 import { createThumbs, TEMPLATES, THUMB_TOOL } from './thumbs.mjs';
+import { createRegistry, createProjectDir, listDir, probe, upgradeScript, DEFAULT_PARENT, srcPath, VIDEO_EXT } from './projects.mjs';
+import os from 'node:os';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-// 작업 폴더 설정: 환경변수 ZK_WORK_DIR > studio.config.json > ../ (기존 위치)
+// 전역 설정(ffmpeg·기본 폰트)은 studio.config.json, 작업 데이터는 프로젝트 폴더별
 let cfg = {};
 try { cfg = JSON.parse(fs.readFileSync(path.join(HERE, 'studio.config.json'), 'utf8')); } catch {}
-const WORK = path.resolve(HERE, process.env.ZK_WORK_DIR || cfg.workDir || '..');
-const ROOT = path.resolve(WORK, cfg.videoDir || '..');
-if (!fs.existsSync(path.join(WORK, 'script.json'))) {
-  console.error(`script.json을 찾을 수 없습니다: ${WORK}\nstudio.config.json의 workDir을 확인하세요.`);
-  process.exit(1);
-}
 const CFG_FILE = path.join(HERE, 'studio.config.json');
 const ffPath = () => cfg.ffmpegPath || 'ffmpeg';
+const ffprobePath = () => (cfg.ffmpegPath ? cfg.ffmpegPath.replace(/ffmpeg(\.exe)?$/i, (m, e) => `ffprobe${e || ''}`) : 'ffprobe');
 const defaultFont = () => cfg.fontName || (process.platform === 'win32' ? 'Malgun Gothic' : 'Noto Sans CJK KR');
-const outDir = () => (cfg.outDir ? path.resolve(WORK, cfg.outDir) : ROOT);
-const SCRIPT = path.join(WORK, 'script.json');
-const fonts = createFonts(WORK);
-fs.mkdirSync(fonts.DIR, { recursive: true });
-const thumbs = createThumbs({ work: WORK, root: ROOT, ffPath: () => ffPath(), fontsMap: () => fonts.fontsMap(), defaultFont: () => defaultFont() });
-const TTS_DIR = path.join(WORK, 'tts');
+const registry = createRegistry(HERE);
+
+// ---- 현재 프로젝트 ----
+let P = null; // { id, name, dir, script, tts, fonts, thumbs }
+let WORK = '', SCRIPT = '', TTS_DIR = '', fonts = null, thumbs = null;
+const outDir = () => { try { const o = JSON.parse(fs.readFileSync(SCRIPT, 'utf8')).project?.outDir; if (o) return path.resolve(WORK, o); } catch {} return path.join(WORK, 'output'); };
+function openProject(entry) {
+  const dir = path.resolve(entry.dir);
+  const file = path.join(dir, 'script.json');
+  const s = JSON.parse(fs.readFileSync(file, 'utf8'));
+  if (upgradeScript(s, { videoRoot: dir })) {
+    try { fs.copyFileSync(file, path.join(dir, 'script.preupgrade.json')); } catch {}
+    fs.writeFileSync(file, JSON.stringify(s, null, 2), 'utf8');
+  }
+  WORK = dir; SCRIPT = file; TTS_DIR = path.join(dir, 'tts');
+  fonts = createFonts(WORK); fs.mkdirSync(fonts.DIR, { recursive: true }); fs.mkdirSync(TTS_DIR, { recursive: true });
+  thumbs = createThumbs({ work: WORK, root: WORK, ffPath: () => ffPath(), fontsMap: () => fonts.fontsMap(), defaultFont: () => defaultFont(),
+    project: () => { try { return JSON.parse(fs.readFileSync(SCRIPT, 'utf8')).project || {}; } catch { return {}; } } });
+  P = { ...entry, dir };
+}
+const need = () => { if (!P) throw Object.assign(new Error('열린 프로젝트가 없습니다'), { status: 409 }); };
+
+// 이전 버전(단일 작업 폴더) → 첫 프로젝트로 등록
+if (registry.isEmpty()) {
+  const legacy = path.resolve(HERE, process.env.ZK_WORK_DIR || cfg.workDir || '..');
+  const lf = path.join(legacy, 'script.json');
+  if (fs.existsSync(lf)) {
+    try {
+      const s = JSON.parse(fs.readFileSync(lf, 'utf8'));
+      const videoRoot = path.resolve(legacy, cfg.videoDir || '..');
+      if (upgradeScript(s, { videoRoot })) {
+        if (!s.project.outDir) s.project.outDir = cfg.outDir ? path.resolve(legacy, cfg.outDir) : videoRoot;
+        fs.copyFileSync(lf, path.join(legacy, 'script.preupgrade.json'));
+        fs.writeFileSync(lf, JSON.stringify(s, null, 2), 'utf8');
+      }
+      registry.add(legacy, s.project?.name || path.basename(legacy));
+      console.log(`  기존 작업 폴더를 프로젝트로 등록: ${legacy}`);
+    } catch (e) { console.error('기존 작업 폴더 이전 실패:', e.message); }
+  }
+}
+if (process.env.ZK_WORK_DIR) { try { registry.open(path.resolve(process.env.ZK_WORK_DIR)); } catch {} }
+if (registry.current()) { try { openProject(registry.current()); } catch (e) { console.error('프로젝트 열기 실패:', e.message); } }
 const DIST = path.join(HERE, 'dist');
 const PORT = Number(process.env.PORT) || 5178;
 const EL = 'https://api.elevenlabs.io';
@@ -51,7 +84,8 @@ const readBody = (req) => new Promise((ok, no) => {
 });
 const safeId = (id) => /^[A-Za-z0-9_-]{1,32}$/.test(id);
 
-async function loadScript() { return JSON.parse(await fsp.readFile(SCRIPT, 'utf8')); }
+async function loadScript() { need(); return JSON.parse(await fsp.readFile(SCRIPT, 'utf8')); }
+const hasVideo = async (k) => { const s = await loadScript(); return !!(k && s.meta?.[k] && (s.videos || []).includes(k)); };
 
 function streamFile(req, res, file, type) {
   let st;
@@ -103,7 +137,7 @@ const EDIT_TOOL = {
             props: { type: 'object', description: 'thumb_layer/thumb_add/thumb_bg/card/card_layer/card_add: 바꿀(또는 새) 속성' },
             style: { type: 'object', description: 'op=style: 자막 스타일에서 바꿀 부분' },
             id: { type: 'string', description: 'update/delete 대상 대사 id (예: A03). add일 때는 생략' },
-            tab: { type: 'string', enum: ['A', 'B'], description: 'add일 때 대상 영상' },
+            tab: { type: 'string', description: 'add일 때 대상 영상 key' },
             start: { type: 'number', description: '편집본 기준 시작 초' },
             text: { type: 'string', description: '화면 자막' },
             tts: { type: 'string', description: 'TTS 발음 텍스트. 빈 문자열이면 발음 사전 자동 적용으로 되돌림' },
@@ -186,7 +220,7 @@ async function agentCall(b, key, tool = EDIT_TOOL, force = false) {
 }
 
 async function thumbsAgent(b, key) {
-  const s = await loadScript(); const meta = s.meta?.[b.key];
+  const s = await loadScript(); const meta = s.meta?.[b.key]; const pj = s.project || {};
   if (!meta) throw Object.assign(new Error('bad key'), { status: 400 });
   const count = Math.max(1, Math.min(10, b.count || 4));
   const cands = await thumbs.sample(b.key, Math.max(16, Math.min(24, b.candidates || count * 2 + 4)));
@@ -195,18 +229,19 @@ async function thumbsAgent(b, key) {
   const chapters = (meta.chapters || []).map((c, i) => `${c.num} ${c.kr} (${offs[i]?.toFixed(0)}s~)`).join(', ');
   const narration = [...(s[b.key] || [])].sort((x, y) => x.start - y.start).map((l) => `${l.start}s ${l.text}`).join('\n');
   const system = [
-    '너는 게임 유튜브 썸네일 아트 디렉터다. ProjectZK는 개인 개발자가 만든 탑뷰 시점 공중 액션 슈팅 게임이고, 썸네일은 포트폴리오/홍보용 플레이 영상에 쓰인다.',
-    '레퍼런스 톤(캔바 썸네일): 큰 흰색 굵은 "PROJECT ZK", 라임(#DCF884) 강조 문구 "탑뷰 공중 액션", 흰색 부제 "… 플레이 영상", 날짜. 어두운 남색 계열(#080C0F) 그림자/그라데이션으로 가독성 확보.',
+    '너는 유튜브 썸네일 아트 디렉터다.',
+    `프로젝트: ${pj.name || ''}${pj.brief ? `\n프로젝트 설명·톤(사용자 작성): ${pj.brief}` : ''}`,
+    `브랜드 문구(title 기본값): ${pj.brand || '(없음)'} / 대표 키워드: ${pj.tagline || '(없음)'} / 자막 스타일 색: ${JSON.stringify(s.style?.colors || {})}`,
     `템플릿: ${Object.entries(TEMPLATES).map(([k, v]) => `${k}=${v.desc}`).join(' / ')}`,
     '규칙',
     '- 반드시 propose_thumbnails 도구로 답한다. 초안마다 서로 다른 장면을 고르고, 템플릿도 섞어서 다양하게.',
     '- 요청 개수는 최대치다. 썸네일로 쓸 만한 서로 다른 장면이 부족하면 억지로 채우지 말고 가능한 만큼만 제안한다(비슷한 장면·문구 반복 금지).',
-    '- 좋은 장면: 폭발·미사일 궤적·보스 공중전함·근접 공중전처럼 한눈에 액션이 보이는 프레임, 기체가 잘 보이는 프레임. 피할 장면: 메뉴/로딩/검은 화면, HUD만 잔뜩이고 피사체 없는 장면, 흐릿한 전환.',
+    '- 좋은 장면: 한눈에 무슨 일이 일어나는지 보이는 프레임, 주인공·피사체가 잘 보이는 프레임. 피할 장면: 메뉴/로딩/검은 화면, 피사체 없는 장면, 흐릿한 전환.',
     '- kicker는 한국어 4~10자, 작은 크기에서도 읽히는 강한 표현. 화면에 실제로 보이는 것만 말한다(없는 기능 지어내지 말 것).',
     '- 텍스트가 놓일 영역(템플릿 설명 참고)에 중요한 피사체가 가려지지 않게 고르고, 피사체가 작으면 zoom/fx/fy로 확대.',
-    '- sub/badge는 기본값을 쓰려면 생략 가능. title은 보통 PROJECT ZK.',
+    '- sub/badge는 기본값을 쓰려면 생략 가능. title은 보통 브랜드 문구(없으면 짧은 영상 제목).',
   ].join('\n');
-  const parts = [{ text: `영상: ${meta.title} 플레이 영상 (${meta.date || ''}), 편집본 ${t.toFixed(0)}초\n챕터: ${chapters || '없음'}\n나레이션:\n${narration}\n\n후보 프레임 ${cands.length}장:` }];
+  const parts = [{ text: `영상: ${meta.title} (${meta.date || ''}), 편집본 ${t.toFixed(0)}초\n챕터: ${chapters || '없음'}\n나레이션:\n${narration}\n\n후보 프레임 ${cands.length}장:` }];
   for (const c of cands) {
     parts.push({ text: `후보 ${c.i} — 편집본 ${c.t}s` });
     parts.push({ image: `data:image/jpeg;base64,${(await fsp.readFile(c.file)).toString('base64')}` });
@@ -246,25 +281,26 @@ const YT_TOOL = {
 };
 
 async function youtubeAgent(b, key) {
-  const s = await loadScript(); const meta = s.meta?.[b.key];
+  const s = await loadScript(); const meta = s.meta?.[b.key]; const pj = s.project || {};
   if (!meta) throw Object.assign(new Error('bad key'), { status: 400 });
   const offs = []; let t = 0; for (const [a, e] of meta.segs) { offs.push(t); t += e - a; }
   const total = t + (meta.end_card ?? 4);
   const yt = meta.youtube || {};
-  const other = Object.entries(s.meta || {}).filter(([k]) => k !== b.key).map(([k, m]) => `${m.title} 플레이 영상(${m.date || ''})`).join(', ');
+  const other = Object.entries(s.meta || {}).filter(([k]) => k !== b.key).map(([k, m]) => `${m.title}(${m.date || ''})`).join(', ');
   const narration = [...(s[b.key] || [])].sort((x, y) => x.start - y.start).map((l) => `${l.start}s ${l.text}`).join('\n');
   const system = [
-    '너는 인디 게임 개발자의 유튜브 채널 운영을 돕는 카피라이터다. ProjectZK는 개인 개발자가 만든 탑뷰 시점 공중 액션 슈팅 게임이고, 영상은 포트폴리오/홍보용 플레이 영상이다.',
+    '너는 유튜브 채널 운영을 돕는 카피라이터다.',
+    `프로젝트: ${pj.name || ''}${pj.brief ? `\n프로젝트 설명·톤(사용자 작성): ${pj.brief}` : ''}`,
     '반드시 propose_youtube 도구로 답한다. 한국어로 쓴다.',
     '규칙',
     '- 사실만 쓴다: 나레이션·챕터·사용자 메모에 근거가 있는 내용만. 없는 기능·출시일·플랫폼·수상 등은 지어내지 않는다. 날짜는 촬영/빌드 날짜로만 언급.',
-    '- 제목: 4~6개, 서로 다른 방향(정보형/액션 훅/개발기록/질문형 등). 60자 안팎 권장, 핵심 키워드(Project ZK, 탑뷰 슈팅/공중전 등)를 앞쪽에. 과장된 낚시·이모지 남발 금지.',
+    '- 제목: 4~6개, 서로 다른 방향(정보형/액션 훅/개발기록/질문형 등). 60자 안팎 권장, 핵심 키워드(프로젝트·브랜드 이름, 주제)를 앞쪽에. 과장된 낚시·이모지 남발 금지.',
     '- 설명: 첫 1~2줄은 시청자를 붙잡는 훅, 이어서 영상 소개(무엇을 볼 수 있는지), 개발 단계 안내(화면·시스템 변경 가능), 댓글/구독 유도 1~2문장. 3~5문단, 문단 사이 빈 줄. 타임스탬프와 해시태그는 넣지 않는다(도구가 따로 붙임).',
     '- 사용자의 기존 초안·메모의 톤과 사실을 존중하고 개선한다.',
     '- 태그: 검색 키워드 위주, 중복 없이. 해시태그 3~5개(첫 3개가 제목 위에 노출됨).',
   ].join('\n');
   const parts = [{ text: [
-    `영상: ${meta.title} 플레이 영상 · 날짜 ${meta.date || '미정'} · 편집본 길이 ${Math.floor(total / 60)}분 ${Math.round(total % 60)}초`,
+    `영상: ${meta.title} · 날짜 ${meta.date || '미정'} · 편집본 길이 ${Math.floor(total / 60)}분 ${Math.round(total % 60)}초`,
     other ? `같은 채널의 다른 영상: ${other}` : '',
     `챕터: ${(meta.chapters || []).map((c, i) => `${c.num} ${c.kr}${c.en ? ` (${c.en})` : ''} @${Math.round(offs[i] || 0)}s`).join(', ') || '없음(단일 스테이지)'}`,
     `나레이션 대본:\n${narration || '(없음)'}`,
@@ -299,13 +335,36 @@ const server = http.createServer(async (req, res) => {
   const p = decodeURIComponent(url.pathname);
   const key = req.headers['x-el-key'];
   try {
+    if (p.startsWith('/api/') && !/^\/api\/(projects|fs\/|probe|rawvideo|config|ffmpeg|agent|voices|models|user|font$)/.test(p)) need();
+    // ---- 프로젝트 ----
+    if (p === '/api/projects' && req.method === 'GET') return send(res, 200, { current: P ? { id: P.id, name: P.name, dir: P.dir } : null, projects: registry.list(), defaultParent: DEFAULT_PARENT });
+    if (p === '/api/projects' && req.method === 'POST') {
+      const b = JSON.parse(await readBody(req));
+      if (!String(b.name || '').trim()) return fail(res, 400, '프로젝트 이름을 입력하세요');
+      const dir = await createProjectDir(b.parent || DEFAULT_PARENT, b);
+      const e = registry.add(dir, b.name.trim()); openProject(e);
+      return send(res, 200, { ok: true, id: e.id, dir });
+    }
+    if (p === '/api/projects/open' && req.method === 'POST') {
+      const b = JSON.parse(await readBody(req)); const e = registry.open(b.id || b.dir); openProject(e);
+      return send(res, 200, { ok: true, id: e.id, dir: e.dir });
+    }
+    if (p === '/api/projects/forget' && req.method === 'POST') { const b = JSON.parse(await readBody(req)); registry.forget(b.id); if (P?.id === b.id) P = null; return send(res, 200, { ok: true }); }
+    if (p === '/api/projects/close' && req.method === 'POST') { registry.close(); P = null; return send(res, 200, { ok: true }); }
+    if (p === '/api/fs/list') return send(res, 200, await listDir(url.searchParams.get('dir') || '', url.searchParams.get('mode') || 'video'));
+    if (p === '/api/probe') {
+      const f = url.searchParams.get('path') || '';
+      if (!path.isAbsolute(f) || !fs.existsSync(f)) return fail(res, 400, '파일이 없습니다');
+      return send(res, 200, { path: f, name: path.basename(f), ...(await probe(ffprobePath(), f)) });
+    }
     if (p === '/api/script' && req.method === 'GET') return send(res, 200, await loadScript());
     if (p === '/api/script' && req.method === 'PUT') {
       const body = await readBody(req);
       const j = JSON.parse(body);
-      if (!j.A || !j.B) return fail(res, 400, 'A/B 대본이 없습니다');
+      need(); if (!j.meta || !Array.isArray(j.videos)) return fail(res, 400, '프로젝트 형식이 아닙니다');
       try { await fsp.copyFile(SCRIPT, path.join(WORK, 'script.bak.json')); } catch {}
       await fsp.writeFile(SCRIPT, JSON.stringify(j, null, 2), 'utf8');
+      if (j.project?.name && j.project.name !== P.name) { registry.rename(P.id, j.project.name); P.name = j.project.name; }
       return send(res, 200, { ok: true });
     }
     if (p === '/api/tts' && req.method === 'GET') return send(res, 200, await listTts());
@@ -365,12 +424,13 @@ const server = http.createServer(async (req, res) => {
     // ---- 설정 ----
     if (p === '/api/config' && req.method === 'GET') {
       return send(res, 200, { ffmpegPath: cfg.ffmpegPath || '', fontName: cfg.fontName || '', defaultFont: defaultFont(),
-        outDir: outDir(), workDir: WORK, videoDir: ROOT, platform: process.platform });
+        outDir: P ? outDir() : '', workDir: WORK, platform: process.platform });
     }
     if (p === '/api/config' && req.method === 'PUT') {
       const b = JSON.parse(await readBody(req));
-      for (const k of ['ffmpegPath', 'fontName', 'outDir']) if (k in b) { if (b[k]) cfg[k] = String(b[k]).trim(); else delete cfg[k]; }
+      for (const k of ['ffmpegPath', 'fontName']) if (k in b) { if (b[k]) cfg[k] = String(b[k]).trim(); else delete cfg[k]; }
       await fsp.writeFile(CFG_FILE, JSON.stringify(cfg, null, 2), 'utf8');
+      if ('outDir' in b && P) { const s = await loadScript(); s.project = { ...(s.project || {}), outDir: String(b.outDir || '').trim() || undefined }; await fsp.writeFile(SCRIPT, JSON.stringify(s, null, 2), 'utf8'); }
       return send(res, 200, { ok: true });
     }
     if (p === '/api/ffmpeg/check') return send(res, 200, { ...(await checkFfmpeg(ffPath())), path: ffPath(),
@@ -378,9 +438,9 @@ const server = http.createServer(async (req, res) => {
     // ---- 실제 렌더 프레임 (최종 결과물과 동일한 자막) ----
     if (p === '/api/frame') {
       const key = url.searchParams.get('key'); const t = parseFloat(url.searchParams.get('t') || '0');
-      if (key !== 'A' && key !== 'B') return fail(res, 400, 'bad key');
+      if (!(await hasVideo(key))) return fail(res, 400, 'bad key');
       const file = await renderFrame(key, t, { font: defaultFont(), width: Number(url.searchParams.get('w')) || 1600 },
-        { ff: ffPath(), work: WORK, root: ROOT, fontsMap: () => fonts.fontsMap() });
+        { ff: ffPath(), work: WORK, root: WORK, fontsMap: () => fonts.fontsMap() });
       return send(res, 200, await fsp.readFile(file), 'image/jpeg');
     }
     if (p === '/api/font') return send(res, 200, { font: defaultFont() });
@@ -395,16 +455,16 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/thumbs/templates') return send(res, 200, TEMPLATES);
     if (p === '/api/thumbs' && req.method === 'GET') return send(res, 200, await thumbs.load());
     if (p === '/api/thumbs' && req.method === 'POST') {
-      const b = JSON.parse(await readBody(req)); if (b.key !== 'A' && b.key !== 'B') return fail(res, 400, 'bad key');
+      const b = JSON.parse(await readBody(req)); if (!(await hasVideo(b.key))) return fail(res, 400, 'bad key');
       return send(res, 200, await thumbs.upsert(b, { render: url.searchParams.get('render') !== '0' }));
     }
     if (p === '/api/thumbs/bg') {
-      const q = Object.fromEntries(url.searchParams); if (q.key !== 'A' && q.key !== 'B') return fail(res, 400, 'bad key');
+      const q = Object.fromEntries(url.searchParams); if (!(await hasVideo(q.key))) return fail(res, 400, 'bad key');
       return send(res, 200, await thumbs.background({ key: q.key, t: +q.t || 0, zoom: +q.zoom || 1, fx: q.fx != null ? +q.fx : 0.5, fy: q.fy != null ? +q.fy : 0.5,
         grade: { contrast: q.c != null ? +q.c : undefined, saturation: q.s != null ? +q.s : undefined, brightness: q.b != null ? +q.b : undefined } }), 'image/jpeg');
     }
     if (p === '/api/thumbs/still') {
-      const q = Object.fromEntries(url.searchParams); if (q.key !== 'A' && q.key !== 'B') return fail(res, 400, 'bad key');
+      const q = Object.fromEntries(url.searchParams); if (!(await hasVideo(q.key))) return fail(res, 400, 'bad key');
       return send(res, 200, await thumbs.still(q.key, +q.t || 0, Math.max(80, Math.min(640, +q.w || 240))), 'image/jpeg');
     }
     if (p === '/api/youtube/agent' && req.method === 'POST') return send(res, 200, await youtubeAgent(JSON.parse(await readBody(req)), req.headers['x-ai-key']));
@@ -418,12 +478,13 @@ const server = http.createServer(async (req, res) => {
     // ---- 내보내기 ----
     if (p === '/api/export' && req.method === 'POST') {
       const b = JSON.parse(await readBody(req));
-      const targets = (b.targets || []).filter((k) => k === 'A' || k === 'B');
+      const sc = await loadScript();
+      const targets = (b.targets || []).filter((k) => (sc.videos || []).includes(k));
       if (!targets.length) return fail(res, 400, '내보낼 영상을 선택하세요');
-      const job = await startExport({ ...b, targets, font: b.font || defaultFont() }, { ff: ffPath(), work: WORK, root: ROOT, outDir: outDir(), fontsMap: () => fonts.fontsMap() });
+      const job = await startExport({ ...b, targets, font: b.font || defaultFont(), prefix: (sc.project?.name || 'video').replace(/[\\/:*?"<>|\s]+/g, '') }, { ff: ffPath(), work: WORK, root: WORK, outDir: outDir(), fontsMap: () => fonts.fontsMap() });
       return send(res, 200, { id: job.id });
     }
-    m = /^\/api\/export\/([a-z0-9]+)(?:\/(cancel|file\/([AB])))?$/.exec(p);
+    m = /^\/api\/export\/([a-z0-9]+)(?:\/(cancel|file\/([A-Za-z0-9_-]+)))?$/.exec(p);
     if (m) {
       const job = getJob(m[1]); if (!job) return fail(res, 404, '작업 없음');
       if (m[2] === 'cancel') { cancelJob(m[1]); return send(res, 200, { ok: true }); }
@@ -434,18 +495,26 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/open' && req.method === 'POST') {
       const b = JSON.parse(await readBody(req));
       const target = path.resolve(String(b.path || ''));
-      const allowed = [ROOT, outDir(), WORK].some((d) => target === d || target.startsWith(d + path.sep));
+      const vids = P ? Object.values((await loadScript()).meta || {}).map((m) => path.dirname(srcPath(m, WORK) || '')).filter(Boolean) : [];
+      const allowed = [outDir(), WORK, ...vids].some((d) => target === d || target.startsWith(d + path.sep));
       if (!allowed || !fs.existsSync(target)) return fail(res, 400, '열 수 없는 경로');
       const isDir = fs.statSync(target).isDirectory();
       if (process.platform === 'win32') spawn('explorer', isDir ? [target] : [`/select,${target}`], { detached: true, stdio: 'ignore' }).unref();
       else spawn(process.platform === 'darwin' ? 'open' : 'xdg-open', [isDir ? target : path.dirname(target)], { detached: true, stdio: 'ignore' }).on('error', () => {}).unref();
       return send(res, 200, { ok: true });
     }
-    m = /^\/api\/video\/([AB])$/.exec(p);
+    m = /^\/api\/video\/([A-Za-z0-9_-]+)$/.exec(p);
     if (m) {
       const s = await loadScript();
-      const src = s.meta?.[m[1]]?.src; if (!src) return fail(res, 404, 'meta.src 없음');
-      return streamFile(req, res, path.join(ROOT, path.basename(src)), 'video/mp4');
+      const f = srcPath(s.meta?.[m[1]], WORK); if (!f) return fail(res, 404, '영상 경로 없음');
+      const ext = path.extname(f).toLowerCase();
+      return streamFile(req, res, f, ext === '.webm' ? 'video/webm' : ext === '.mov' ? 'video/quicktime' : 'video/mp4');
+    }
+    // 원본 파일 직접 미리보기 (영상 추가 시)
+    if (p === '/api/rawvideo') {
+      const f = url.searchParams.get('path') || '';
+      if (!path.isAbsolute(f) || !VIDEO_EXT.includes(path.extname(f).toLowerCase())) return fail(res, 400, 'bad path');
+      return streamFile(req, res, f, 'video/mp4');
     }
     if (p.startsWith('/api/')) return fail(res, 404, 'not found');
 
@@ -461,7 +530,7 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, '127.0.0.1', () => {
   const u = `http://localhost:${PORT}`;
-  console.log(`\n  ZK TTS Studio  →  ${u}\n  작업 폴더: ${WORK}\n  영상 폴더: ${ROOT}\n  종료: Ctrl+C\n`);
+  console.log(`\n  TTS Studio  →  ${u}\n  프로젝트: ${P ? `${P.name} (${P.dir})` : '(선택 안 됨 — 브라우저에서 만들거나 여세요)'}\n  종료: Ctrl+C\n`);
   if (!process.env.NO_OPEN) {
     const cmd = process.platform === 'win32' ? `start "" "${u}"` : process.platform === 'darwin' ? `open ${u}` : `xdg-open ${u}`;
     exec(cmd, () => {});

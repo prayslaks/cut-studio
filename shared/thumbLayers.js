@@ -6,7 +6,7 @@
 export const TW = 1280, TH = 720;
 
 export const TEMPLATES = {
-  magazine: { label: '매거진', desc: '왼쪽 위 큰 PROJECT ZK, 왼쪽 아래에 날짜·라임색 키워드·부제 (캔바 썸네일과 같은 배치). 왼쪽이 어둡게 깔림' },
+  magazine: { label: '매거진', desc: '왼쪽 위 큰 브랜드 문구, 왼쪽 아래에 날짜·강조색 키워드·부제. 왼쪽이 어둡게 깔림' },
   impact: { label: '임팩트', desc: '화면 하단 중앙에 아주 큰 라임색 키워드, 그 아래 부제. 브랜드는 왼쪽 위 작게. 하단이 어둡게 깔림' },
   split: { label: '스플릿', desc: '오른쪽 40%에 어두운 패널, 오른쪽 정렬로 브랜드·키워드·부제. 왼쪽 60%에 장면 주인공을 배치' },
   minimal: { label: '미니멀', desc: '장면을 크게 살리고 왼쪽 아래에 라임 바 + 키워드 + 작은 브랜드만' },
@@ -32,7 +32,7 @@ export function templateLayers(tpl, f, style) {
   const FS = { family: style?.fonts?.sub?.family || 'Noto Sans KR', weight: style?.fonts?.sub?.weight || 700, source: style?.fonts?.sub?.source };
   const sh = (d) => ({ dist: d, color: C.outline, alpha: 1 });
   const T = (role, text, o) => (text ? [textLayer({ role, text, color: C.text, shadow: sh(4), outline: { width: 0, color: C.outline }, ...o })] : []);
-  const title = f.title ?? 'PROJECT ZK';
+  const title = f.title ?? '';
   switch (tpl) {
     case 'impact': return [
       gradLayer({ x: 0, y: 330, w: TW, h: TH - 330, from: 0.92, to: 0, dir: 'up', color: C.outline }),

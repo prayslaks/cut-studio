@@ -34,8 +34,7 @@ export function resolveStyle(style = {}, fontsMap = {}, fallbackFont = 'Malgun G
   return st;
 }
 export const SUB_TAIL = 0.35; // 자막이 음성보다 늦게 사라지는 시간
-export const KEYWORDS = ['Project ZK', 'AWACS', '벌컨', '다트', '레이저', '플레어', '에어브레이크', '부스트', '기총', '미사일',
-  '스트레스', '미니맵', '로드아웃', '공중전함', '에어프레임', '레이더', '록온'];
+export const KEYWORDS = []; // 강조 키워드 기본값 (프로젝트별로 자막 스타일 탭에서 지정)
 
 // 나레이션 자막 스타일 (ASS Style: Sub)
 export const SUB = { fs: 68, marginV: 275, marginH: 200, outline: 5, shadow: 3, shadowAlpha: 0.5, maxChars: 30 };

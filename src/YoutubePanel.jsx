@@ -118,7 +118,7 @@ export default function YoutubePanel({ meta, setMeta, tl, tab, ai, aiKey, onOpen
           <label className="chk"><input type="checkbox" checked={yt.useHashtags !== false} onChange={(e) => set({ useHashtags: e.target.checked })} />해시태그 붙이기</label>
         </div>
         <label className="field"><span>해시태그 (공백으로 구분, 앞 3개가 제목 위에 표시)</span>
-          <input value={(yt.hashtags || []).join(' ')} placeholder="#ProjectZK #인디게임 #공중전"
+          <input value={(yt.hashtags || []).join(' ')} placeholder="#브랜드 #주제 #키워드"
             onChange={(e) => set({ hashtags: e.target.value.split(/\s+/).filter((x, i, a) => x || i === a.length - 1) })} /></label>
         <details className="ytprev">
           <summary>최종 설명 미리보기</summary>

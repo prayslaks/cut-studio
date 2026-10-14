@@ -7,6 +7,7 @@ import path from 'node:path';
 
 import { FRAME, SUB, resolveStyle, SUB_TAIL, wrapLines, highlightParts } from './shared/layout.js';
 import { resolveCards, cardInstances, cardAss } from './shared/cards.js';
+import { srcPath } from './projects.mjs';
 
 const { W, H } = FRAME;
 const assColor = (hex = '#FFFFFF') => { const h = hex.replace('#', '').padEnd(6, '0'); return `&H${h.slice(4, 6)}${h.slice(2, 4)}${h.slice(0, 2)}&`.toUpperCase(); };
@@ -72,7 +73,7 @@ const assEsc = (s) => String(s).replace(/[{}\\]/g, '');
 const ev = (layer, a, b, text, style = 'Card') => `Dialogue: ${layer},${ts(a)},${ts(b)},${style},,0,0,0,,${text}\n`;
 const ms = (s) => Math.round(s * 1000);
 
-export function buildAss({ st, meta, cards, fontsMap = {}, offs, body, total, lines }) {
+export function buildAss({ st, meta, cards, fontsMap = {}, offs, body, total, lines, project }) {
   st = st || resolveStyle({});
   const LIME = assColor(st.colors.accent), WHITE = assColor(st.colors.text);
   const assText = (line) => highlightParts(assEsc(line), st.keywords).map((p) => (p.hl ? `{\\c${LIME}}${p.t}{\\c${WHITE}}` : p.t)).join('');
@@ -99,7 +100,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     if (f.source === 'system') return { name: f.family, bold: (f.weight || 700) >= 600 };
     return { name: ft.name, bold: (f.weight || 700) >= 600 };
   };
-  const insts = cardInstances(cards || resolveCards(meta || {}), { meta: meta || {}, offs, body, total });
+  const insts = cardInstances(cards || resolveCards(meta || {}), { meta: meta || {}, offs, body, total, project });
   insts.forEach((inst) => { o += cardAss(inst, st, fontOf, inst.kind === 'end' ? 20 : 0); });
   // 나레이션 자막
   for (const l of lines) {
@@ -165,7 +166,7 @@ async function prepare(key, opts, env) {
   const assName = opts.assName || `subs_${key}.ass`;
   const fontsMap = env.fontsMap ? await env.fontsMap() : {};
   const st = resolveStyle(script.style || {}, fontsMap, opts.font);
-  await fsp.writeFile(path.join(work, assName), buildAss({ st, meta, cards: resolveCards(meta), fontsMap, offs, body, total, lines }), 'utf8');
+  await fsp.writeFile(path.join(work, assName), buildAss({ st, meta, cards: resolveCards(meta), fontsMap, offs, body, total, lines, project: script.project }), 'utf8');
   return { script, meta, segs, endDur, offs, body, total, lines, assName, st };
 }
 
@@ -178,7 +179,7 @@ export async function renderFrame(key, t, opts, env) {
   if (t >= P.body) inp = ['-f', 'lavfi', '-i', `color=c=0x080C0F:s=${W}x${H}:d=1`];
   else {
     const i = P.offs.reduce((k, o, j) => (o <= t ? j : k), 0);
-    inp = ['-ss', (P.segs[i][0] + t - P.offs[i]).toFixed(3), '-i', path.join(root, path.basename(P.meta.src))];
+    inp = ['-ss', (P.segs[i][0] + t - P.offs[i]).toFixed(3), '-i', srcPath(P.meta, root)];
   }
   const out = path.join(work, `frame_${key}.jpg`);
   const r = await run(ff, ['-y', '-hide_banner', '-loglevel', 'error', ...inp, '-frames:v', '1', '-vf',
@@ -205,7 +206,7 @@ async function exportOne(it, opts, env, job) {
   }
 
   // 필터 그래프
-  const src = path.join(root, path.basename(meta.src));
+  const src = srcPath(meta, root);
   const inputs = ['-i', src]; const fc = []; const n = segs.length;
   // 마지막 구간: 엔딩 카드로 넘어가기 전에 게임 소리를 길게 페이드아웃 (소스가 끝나며 뚝 끊기지 않도록)
   const endFade = Math.max(FADE, Math.min(+(opts.endFade ?? 3), 10));

@@ -2,3 +2,4 @@ node_modules/
 *.log
 *.tgz
 studio.config.json
+projects.json

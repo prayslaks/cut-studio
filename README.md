@@ -1,29 +1,36 @@
-# ZK TTS Studio
+# TTS Studio
 
-ProjectZK 홍보 영상 나레이션(ElevenLabs TTS) 검토·생성용 로컬 웹앱.
+영상에 나레이션(ElevenLabs TTS)·자막·인트로/챕터/엔딩 카드·썸네일·유튜브 업로드 문구를 붙여 MP4로 내보내는 로컬 웹앱.
+**프로젝트** 단위로 작업하며, 어떤 영상이든 추가해서 쓸 수 있습니다. (ProjectZK 홍보 영상 작업에서 시작)
 
 ## 실행
 - `start.bat` 더블클릭 (Node.js 18+ 필요) → 브라우저가 http://localhost:5178 으로 열림
 - 또는 `node server.mjs`
+- ffmpeg 필요: `winget install Gyan.FFmpeg` (libass 포함 빌드)
+
+## 프로젝트
+- 처음 실행하면 **프로젝트 시작 화면**: 최근 프로젝트 / 새 프로젝트 / 폴더에서 열기
+- 프로젝트 = 폴더 하나 (`script.json` + `tts/` + `thumbs/` + `fonts/`). 기본 위치 `내 비디오\TTS Studio\<이름>`, 만들 때 변경 가능
+- 새 프로젝트 설정 (상단 `프로젝트 설정`에서 언제든 수정)
+  - **브랜드 문구** `{brand}` · **대표 키워드** `{tagline}` · **부제 형식** `{subtitle}` (`{title}` = 영상 제목): 인트로·엔딩 카드와 썸네일 템플릿의 기본 문구
+  - **프로젝트 설명**: AI 어시스턴트·썸네일 초안·업로드 문구 추천이 사실·톤의 근거로 사용
+  - **출력 폴더**: MP4·SRT·썸네일 PNG 저장 위치 (기본 `프로젝트\output`)
+- 상단 프로젝트 이름(▾)을 눌러 다른 프로젝트로 전환
+- **영상 추가** (`＋ 영상` 탭): PC 폴더를 탐색해 영상 파일 선택(복사하지 않고 원래 위치 사용) → 제목·날짜·엔딩 문구, **사용할 구간**(앞뒤 자르기·중간 빼기: 원본을 보면서 `⇤`/`⇥`로 현재 위치를 구간 시작/끝으로), 구간별 **챕터 제목**(적은 구간만 챕터 카드 표시), 엔딩 카드 길이
+- 영상 탭의 ⚙(또는 더블클릭)으로 같은 설정을 다시 열기·영상 빼기
+- 이전 버전(작업 폴더 하나만 쓰던 방식)의 `studio.config.json`이 있으면 첫 실행 때 그 폴더를 프로젝트로 자동 등록(원본 `script.preupgrade.json` 백업)
 
 ## 설정
-상단 `⚙ 설정` 창에서 API 키(ElevenLabs / Claude / OpenAI, 연결 테스트), ffmpeg 경로, 자막 폰트, 출력 폴더를 관리. 키는 브라우저에만 보관(선택), 나머지는 `studio.config.json`에 저장.
-
-`studio.config.json` (git에는 올리지 않음 — `studio.config.example.json`을 복사해서 사용)
-- `workDir`: script.json / tts / build.py 가 있는 작업 폴더 (기본: `C:\Users\prays\Videos\Captures\_edit_work`)
-- `videoDir`: 원본 mp4 폴더, workDir 기준 상대경로 (기본 `..`)
-- `ffmpegPath` / `fontName` / `outDir`: 내보내기용 (설정 창에서 편집)
-- 환경변수 `ZK_WORK_DIR`, `PORT` 로 덮어쓰기 가능
+상단 `⚙ 설정`: API 키(ElevenLabs / Claude / OpenAI, 연결 테스트), AI 제공자·모델, ffmpeg 경로, 기본 자막 폰트, 작업·API 로그. 키는 브라우저에만 보관(선택), ffmpeg·폰트는 `studio.config.json`(git 제외 — `studio.config.example.json` 참고), 프로젝트 목록은 `projects.json`(git 제외).
 
 ## 구조
-- `server.mjs` : 의존성 없는 Node 서버. 작업 폴더의 `script.json` 읽기/쓰기, `tts/*.mp3` 생성·서빙, 원본 영상 Range 스트리밍, ElevenLabs 프록시(키는 요청 헤더로만 전달, 디스크에 저장하지 않음)
+- `server.mjs` : 의존성 없는 Node 서버. 프로젝트 열기·전환, 대본 읽기/쓰기, TTS 생성·서빙, 영상 Range 스트리밍, ElevenLabs·AI 프록시(키는 요청 헤더로만 전달, 디스크에 저장하지 않음)
+- `projects.mjs` : 프로젝트 레지스트리·생성·이전(구버전 변환)·파일 탐색·ffprobe
 - `export.mjs` : MP4 내보내기 (ASS 자막 생성 + ffmpeg 한 번에 트림·번인·TTS 덕킹 믹스, 진행률 추적, 하드웨어 인코더 감지)
-- `fonts.mjs` : Google Fonts 카탈로그·설치(작업 폴더 `fonts/`에 TTF 저장, 이름·libass 크기 비율 추출). 미리보기(@font-face)와 ffmpeg(fontsdir)가 같은 파일 사용
-- `thumbs.mjs` : 썸네일 레이어 → ASS → 1280×720 PNG 렌더, 편집기 배경 프레임, 후보 프레임 추출, AI 도구 정의
-- `shared/thumbLayers.js` : 썸네일 레이어 모델·템플릿(매거진/임팩트/스플릿/미니멀) — 편집기와 서버 렌더 공용
-- `shared/layout.js` : 자막 레이아웃·스타일(2560×1440 프레임 좌표). 미리보기와 내보내기가 같은 정의를 사용
-- `shared/cards.js` : 영상 카드(인트로·챕터·엔딩) 레이어 모델·기본값·타이밍·ASS 변환. 미리보기·편집기·내보내기 공용
-- `src/` : React UI (Vite). 수정 후 `npm install && npm run build` 로 `dist/` 갱신. 개발 시 `npm run dev` + `node server.mjs` 동시 실행
+- `fonts.mjs` : Google Fonts 카탈로그·설치(프로젝트 `fonts/`에 TTF 저장). 미리보기와 ffmpeg가 같은 파일 사용
+- `thumbs.mjs` : 썸네일 레이어 → ASS → 1280×720 PNG 렌더, 배경·후보 프레임 추출, AI 도구 정의
+- `shared/` : 미리보기·편집기·서버 렌더가 공유하는 정의 (`layout.js` 자막·스타일, `cards.js` 카드 모델·변수, `thumbLayers.js` 썸네일 템플릿)
+- `src/` : React UI (Vite). 수정 후 `npm install && npm run build` 로 `dist/` 갱신. 개발 시 `npm run dev` + `node server.mjs`
 - `dist/` : 빌드된 UI (서버가 그대로 서빙)
 
 ## 흐름
@@ -48,7 +55,7 @@ ProjectZK 홍보 영상 나레이션(ElevenLabs TTS) 검토·생성용 로컬 �
 8. **자막 스타일** 탭
    - 자막 폰트 / 제목 폰트(카드에서 '스타일: 제목 폰트'로 둔 레이어·썸네일 헤드라인)를 Google Fonts에서 검색·선택하면 자동 설치(한글 지원 필터). PC 설치 폰트 직접 지정 가능
    - 본문·강조·외곽선 색(프리셋: 썸네일 톤 등), 자막 크기·외곽선·그림자·아래 여백·줄바꿈 기준, 강조 키워드
-   - 미리보기·실제 렌더·MP4·썸네일 모두 같은 스타일 사용 (Ctrl+S로 script.json에 저장)
+   - 미리보기·실제 렌더·MP4·썸네일 모두 같은 스타일 사용 (Ctrl+S로 프로젝트에 저장)
 9. **카드** 탭 — 영상에 번인되는 인트로·챕터·엔딩 카드 (썸네일과 별개, `script.json`의 `meta.{A|B}.cards`에 저장)
    - 인트로/챕터/엔딩 선택 → 영상이 그 카드 위치로 이동, 영상 위에서 레이어 클릭·드래그(이동)·핸들(크기), 방향키·Delete·Ctrl+Z/Y
    - 아래 인스펙터: 레이어 추가(텍스트/박스/그라데이션)·순서·숨김, 폰트·크기·자간·불투명도·색·외곽선·그림자·기준점, **등장 애니메이션**(지연·시작 위치 오프셋·이동 시간·페이드)
