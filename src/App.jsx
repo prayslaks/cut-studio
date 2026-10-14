@@ -15,6 +15,7 @@ import { SettingsModal, ExportModal } from './Modals.jsx';
 import { useCards } from './cards/useCards.js';
 import CardsPanel from './cards/CardsPanel.jsx';
 import YoutubePanel from './YoutubePanel.jsx';
+import Timeline from './Timeline.jsx';
 import VideoModal from './project/VideoModal.jsx';
 import ProjectHome from './project/ProjectHome.jsx';
 import ProjectSettings from './project/ProjectSettings.jsx';
@@ -887,9 +888,17 @@ export default function App({ project }) {
             )}
           </div>
 
-          <Timeline tl={tl} lines={lines} durOf={durOf} statusOf={statusOf} warnings={warnings}
+          <Timeline tl={tl} lines={lines} durOf={durOf} statusOf={statusOf} warnings={warnings} playing={playing}
             editTime={editTime} sel={sel} onSeek={seek} onSel={(l, keep) => { setSel(l.id); if (!keep) seek(Math.max(0, l.start - 0.5)); }}
-            onMove={moveLine} onDragStart={stop} onDrop={(id) => scrollToLine(id)} />
+            onMove={moveLine} onDragStart={stop} onDrop={(id) => scrollToLine(id)}
+            chapters={meta?.chapters || []} insts={insts} thumbs={T.list.filter((d) => d.key === tab)}
+            onCardClick={(inst) => { setSide('cards'); C.setKind(inst.kind); focusCard(inst); }}
+            onCardDragStart={(inst) => { if (inst.kind === 'intro') C.beginGesture(); }}
+            onCardMove={(inst, a) => {
+              if (inst.kind === 'intro') C.updateCard('intro', { start: a }, { commit: false });
+              else if (inst.kind === 'chapter') setMeta((m) => ({ ...m, chapters: (m.chapters || []).map((c, i) => (i === inst.idx ? { ...c, cardAt: Math.round((a - (tl.parts[i]?.off ?? 0)) * 100) / 100 } : c)) }));
+            }}
+            onThumbClick={(d) => { setSide('thumbs'); T.select(d.id); }} />
 
           <div className="transport">
             <button className="primary" onClick={() => (playing ? stop() : startPlay(editTime))}>{playing ? '■ 정지' : '▶ 편집본 재생'}</button>
@@ -1140,66 +1149,3 @@ function Section({ id, title, summary, className = '', defaultOpen = false, chil
   );
 }
 
-function Timeline({ tl, lines, durOf, statusOf, warnings, editTime, sel, onSeek, onSel, onMove, onDragStart, onDrop }) {
-  const ref = useRef(null);
-  const drag = useRef(null);
-  const [tip, setTip] = useState(null);
-  const pct = (t) => `${(t / tl.total) * 100}%`;
-  const toT = (x) => { const r = ref.current.getBoundingClientRect(); return Math.max(0, Math.min(tl.total, ((x - r.left) / r.width) * tl.total)); };
-  const pxPerSec = () => ref.current.getBoundingClientRect().width / tl.total;
-
-  // 빈 곳: 클릭/드래그로 재생 위치 이동
-  const downBg = (e) => {
-    if (e.button !== 0) return;
-    drag.current = { mode: 'seek' }; e.currentTarget.setPointerCapture(e.pointerId);
-    onSeek(toT(e.clientX));
-  };
-  // 대사 마커: 드래그로 시작 시각 이동 (0.1초 단위, Alt = 0.01초, 재생 위치 근처에서 자석)
-  const downMark = (e, l) => {
-    if (e.button !== 0) return;
-    e.stopPropagation(); e.preventDefault();
-    ref.current.setPointerCapture(e.pointerId);
-    drag.current = { mode: 'mark', id: l.id, x0: e.clientX, s0: l.start, moved: false, l };
-  };
-  const move = (e) => {
-    const d = drag.current; if (!d) return;
-    if (d.mode === 'seek') { onSeek(toT(e.clientX)); return; }
-    const dx = e.clientX - d.x0;
-    if (!d.moved) { if (Math.abs(dx) < 3) return; d.moved = true; onDragStart?.(); onSel(d.l, true); }
-    const pps = pxPerSec(); const step = e.altKey ? 0.01 : 0.1;
-    let t = d.s0 + dx / pps;
-    if (Math.abs(t - editTime) * pps < 6) t = editTime;           // 재생 위치에 붙기
-    t = Math.round(Math.max(0, Math.min(tl.total - 0.5, t)) / step) * step;
-    t = Math.round(t * 100) / 100;
-    if (t !== d.cur) { d.cur = t; onMove(d.id, t); onSeek(t); }
-    const r = ref.current.getBoundingClientRect();
-    setTip({ x: ((t / tl.total) * r.width), text: `${d.id} ${fmt(t)}  (${t - d.s0 >= 0 ? '+' : '−'}${Math.abs(t - d.s0).toFixed(e.altKey ? 2 : 1)}s)` });
-  };
-  const up = () => {
-    const d = drag.current; drag.current = null; setTip(null);
-    if (d?.mode === 'mark' && !d.moved) onSel(d.l);
-    if (d?.mode === 'mark' && d.moved) setTimeout(() => onDrop?.(d.id), 50);
-  };
-  useEffect(() => {
-    const h = (e) => { const d = drag.current; if (e.key === 'Escape' && d?.mode === 'mark' && d.moved) { onMove(d.id, d.s0); onSeek(d.s0); drag.current = null; setTip(null); } };
-    window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h);
-  }, [onMove, onSeek]);
-
-  return (
-    <div className="timeline" ref={ref} onPointerDown={downBg} onPointerMove={move} onPointerUp={up} onPointerCancel={up}>
-      <div className="segs">
-        {tl.parts.map((g) => <div key={g.i} className="seg" style={{ left: pct(g.off), width: pct(g.dur) }} title={`세그먼트 ${g.i + 1}: 원본 ${fmt(g.s)}–${fmt(g.e)}`} />)}
-        <div className="seg end" style={{ left: pct(tl.body), width: pct(tl.total - tl.body) }} title="엔딩 카드" />
-      </div>
-      <div className="marks">
-        {lines.map((l) => (
-          <div key={l.id} className={`mark ${statusOf(l)} ${warnings[l.id] ? 'warnm' : ''} ${sel === l.id ? 'sel' : ''} ${drag.current?.id === l.id && drag.current.moved ? 'dragging' : ''}`}
-            style={{ left: pct(l.start), width: pct(durOf(l)) }} title={`${l.id} ${fmt(l.start)} · ${l.text}\n드래그: 시작 시각 이동 (0.1초, Alt 0.01초, Esc 취소)`}
-            onPointerDown={(e) => downMark(e, l)}>{l.id.slice(1)}</div>
-        ))}
-      </div>
-      <div className="head" style={{ left: pct(editTime) }} />
-      {tip && <div className="tl-tip" style={{ left: tip.x }}>{tip.text}</div>}
-    </div>
-  );
-}

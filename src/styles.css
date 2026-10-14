@@ -64,17 +64,6 @@ header {
   text-shadow: 0 0 3px #080c0f, 0 0 3px #080c0f, 2px 2px 3px #080c0f, -1px -1px 2px #080c0f;
 }
 .sub em { font-style: normal; color: var(--lime); }
-.titlecard, .endcard, .chapter { position: absolute; pointer-events: none; }
-.titlecard { inset: 0; background: rgba(8, 12, 15, .55); padding: 2.6% 3%; display: flex; flex-direction: column; }
-.titlecard b { font-size: clamp(28px, 7vw, 92px); font-weight: 900; letter-spacing: -2px; line-height: 1; }
-.titlecard i { margin-top: auto; font-style: normal; color: var(--lime); font-weight: 800; font-size: clamp(14px, 2.6vw, 34px); }
-.titlecard span { font-weight: 700; font-size: clamp(12px, 1.9vw, 24px); }
-.endcard { inset: 0; background: var(--bg); display: grid; place-content: center; text-align: center; gap: 6px; }
-.endcard b { font-size: clamp(28px, 6vw, 78px); font-weight: 900; letter-spacing: -2px; }
-.endcard span { color: var(--lime); letter-spacing: 4px; font-size: 12px; }
-.chapter { left: 3%; top: 37%; border-left: 4px solid var(--lime); padding: 4px 18px; background: linear-gradient(90deg, rgba(8,12,15,.7), transparent); }
-.chapter small { color: var(--lime); font-weight: 700; display: block; font-size: clamp(9px, 1.1vw, 14px); }
-.chapter b { font-size: clamp(16px, 2.6vw, 34px); font-weight: 800; }
 
 .timeline { position: relative; height: 54px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; cursor: pointer; overflow: hidden; }
 .segs { position: absolute; inset: 0 0 auto 0; height: 10px; }
@@ -640,3 +629,30 @@ code.path { font-size: 12px; background: #0a1014; border: 1px solid var(--line);
 .vm-cn { width: 46px; padding: 3px 6px; }
 .vm-segs .row input:not([type=number]) { padding: 4px 8px; min-width: 0; }
 .modal.wide { width: min(1100px, 96vw); }
+
+/* ---- 멀티 트랙 타임라인 ---- */
+.mtl { display: grid; grid-template-columns: 58px minmax(0, 1fr); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; user-select: none; }
+.mtl-labels { display: flex; flex-direction: column; border-right: 1px solid var(--line); background: #0b1115; }
+.mtl-labels > span { display: flex; align-items: center; padding: 0 6px; font-size: 10.5px; color: var(--muted); letter-spacing: .3px; border-bottom: 1px solid #141c22; }
+.mtl-labels .r-ruler { gap: 2px; padding: 0 2px; }
+.mtl-labels .r-ruler button { padding: 0 7px; font-size: 13px; line-height: 16px; }
+.r-ruler { height: 18px; } .r-video { height: 18px; } .r-cards { height: 20px; } .r-lines { height: 30px; } .r-thumbs { height: 14px; }
+.mtl-scroll { overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
+.mtl-inner { position: relative; min-width: 100%; cursor: pointer; touch-action: none; }
+.trk { position: relative; border-bottom: 1px solid #141c22; }
+.trk.r-ruler { background: #0b1115; }
+.tick { position: absolute; top: 0; bottom: 0; border-left: 1px solid #22303a; padding-left: 3px; font-size: 9.5px; color: #5d6c76; font-variant-numeric: tabular-nums; line-height: 18px; pointer-events: none; }
+.clip { position: absolute; top: 2px; bottom: 2px; background: #22323e; border-radius: 3px; font-size: 10px; color: #8fa3b0; padding: 1px 5px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; border: 1px solid #2d4150; }
+.clip:nth-child(even) { background: #263a48; }
+.clip.end { background: #2f2738; border-color: #4a3a56; color: #b49cc4; }
+.cblk { position: absolute; top: 2px; bottom: 2px; border-radius: 3px; font-size: 10px; padding: 1px 5px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; cursor: grab; border: 1px solid; }
+.cblk.intro { background: rgba(124, 196, 255, .18); border-color: #4f86b3; color: var(--blue); }
+.cblk.chapter { background: rgba(220, 248, 132, .14); border-color: var(--lime-d); color: var(--lime); }
+.cblk.end { background: rgba(180, 156, 196, .16); border-color: #6d5880; color: #c9b3d8; cursor: pointer; }
+.cblk:hover { filter: brightness(1.25); }
+.cblk.dragging { outline: 2px solid #fff; z-index: 3; cursor: grabbing; }
+.trk.r-lines .mark { top: 3px; height: auto; bottom: 3px; }
+.tmk { position: absolute; top: 2px; width: 9px; height: 9px; margin-left: -4px; transform: rotate(45deg); background: var(--warn); border-radius: 1px; cursor: pointer; }
+.tmk:hover { background: #fff; }
+.mtl-inner .head { top: 0; bottom: 0; z-index: 4; }
+.mtl-inner .tl-tip { top: 20px; z-index: 6; }

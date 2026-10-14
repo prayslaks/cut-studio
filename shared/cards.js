@@ -84,7 +84,8 @@ export function cardInstances(cards, { meta = {}, offs = [], body, total, projec
   const cc = cards.chapter;
   if (cc?.enabled) (meta.chapters || []).forEach((c, i) => {
     if (!c || i >= (meta.segs || []).length || (!String(c.kr ?? '').trim() && !String(c.en ?? '').trim())) return;
-    const a = (offs[i] ?? 0) + (i === 0 ? cc.firstOffset : cc.offset);
+    // cardAt: 이 챕터만 따로 옮긴 경우(구간 시작 기준 초), 없으면 공통 오프셋
+    const a = (offs[i] ?? 0) + (Number.isFinite(c.cardAt) ? c.cardAt : i === 0 ? cc.firstOffset : cc.offset);
     out.push({ kind: 'chapter', idx: i, a, b: a + cc.dur, card: cc, vars: { ...base, num: c.num ?? '', kr: c.kr ?? '', en: c.en ?? '' } });
   });
   const ce = cards.end;

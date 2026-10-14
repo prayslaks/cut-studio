@@ -45,6 +45,7 @@ export default function CardsPanel({ C, meta, insts, onFocus, onPlay, setMeta, e
           {k === 'chapter' && (<>
             <N label="첫 챕터: 구간 시작 +" value={card.firstOffset} onChange={(v) => set({ firstOffset: v })} />
             <N label="이후 챕터: 구간 시작 +" value={card.offset} onChange={(v) => set({ offset: v })} />
+            <span className="muted sm" style={{ alignSelf: 'center' }}>타임라인 카드 트랙에서 챕터별로 드래그해 옮길 수도 있습니다(↺ = 되돌리기)</span>
             <N label="길이" value={card.dur} min={0.5} onChange={(v) => set({ dur: v })} />
           </>)}
           {k === 'end' && <N label="엔딩 길이(영상 끝에 추가)" value={endDur} min={0} onChange={(v) => setMeta((m) => ({ ...m, end_card: v }))} />}
@@ -85,7 +86,8 @@ export default function CardsPanel({ C, meta, insts, onFocus, onPlay, setMeta, e
                 <input className="num" value={c.num ?? ''} onChange={(e) => setCh(i, { num: e.target.value })} title="{num}" />
                 <input value={c.kr ?? ''} placeholder="한글 제목 {kr}" onChange={(e) => setCh(i, { kr: e.target.value })} />
                 <input value={c.en ?? ''} placeholder="영문 {en}" onChange={(e) => setCh(i, { en: e.target.value })} />
-                <span className="muted sm">{inst ? fmt(inst.a) : ''}</span>
+                <span className="muted sm">{inst ? fmt(inst.a) : ''}{Number.isFinite(c.cardAt) && (
+                  <button className="ghost sm" title="타임라인에서 따로 옮긴 위치를 공통 규칙으로 되돌리기" onClick={(e) => { e.stopPropagation(); setCh(i, { cardAt: undefined }); }}>↺</button>)}</span>
               </div>
             );
           })}
