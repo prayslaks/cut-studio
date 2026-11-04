@@ -166,7 +166,8 @@ const QUALITY = [['high', '고화질', '느림 · 업로드용'], ['standard', '
 const HEIGHTS = [[1440, '1440p (원본)'], [1080, '1080p'], [720, '720p']];
 const PREF = ['h264_nvenc', 'h264_qsv', 'h264_amf', 'libx264'];
 
-export function ExportModal({ summaries, titles, dirty, onSave, job, onStart, onCancel, onClose, say }) {
+// summaries: { 영상키: { 트랙id: 요약 } }, combos: 내보내기 조합(음성 트랙 × 자막 트랙), setCombos: 조합 편집(프로젝트에 저장)
+export function ExportModal({ summaries, titles, tracks, combos, setCombos, dirty, onSave, job, onStart, onCancel, onClose, say }) {
   const [ff, setFf] = useState(null);
   const [cfg, setCfg] = useState(null);
   const [opt, setOpt] = useState(() => {
@@ -186,13 +187,26 @@ export function ExportModal({ summaries, titles, dirty, onSave, job, onStart, on
   useEffect(() => { setOpt((o) => { const t = (o.targets || []).filter((k) => keys.includes(k)); return { ...o, targets: t.length ? t : keys }; }); }, [keys.join()]); // eslint-disable-line
   const set = (k, v) => setOpt((o) => ({ ...o, [k]: v }));
   const toggle = (k) => set('targets', opt.targets.includes(k) ? opt.targets.filter((x) => x !== k) : keys.filter((x) => x === k || opt.targets.includes(x)));
+  const cids = combos.map((c) => c.id);
+  useEffect(() => { setOpt((o) => { const c = (o.combos || []).filter((k) => cids.includes(k)); return { ...o, combos: c.length ? c : cids.slice(0, 1) }; }); }, [cids.join()]); // eslint-disable-line
+  const toggleC = (k) => set('combos', (opt.combos || []).includes(k) ? opt.combos.filter((x) => x !== k) : cids.filter((x) => x === k || (opt.combos || []).includes(x)));
+  const editC = (id, patch) => setCombos((cs) => cs.map((c) => (c.id === id ? { ...c, ...patch } : c)));
+  const addC = () => {
+    const id = `c${Date.now().toString(36)}`; const t = tracks[tracks.length - 1];
+    setCombos((cs) => [...cs, { id, name: `${t.name} 음성`, audio: t.id, subs: tracks[0].id, suffix: `_${t.name}_음성`, audioOnly: false }]);
+    set('combos', [...(opt.combos || []), id]);
+  };
+  const tname = (tid) => (tid ? tracks.find((t) => t.id === tid)?.name || tid : '없음');
+  const sel = combos.filter((c) => (opt.combos || []).includes(c.id));
+  const usedAudio = [...new Set(sel.map((c) => c.audio).filter(Boolean))];
+  const dupSuffix = sel.some((c, i) => sel.findIndex((x) => (x.suffix || '') === (c.suffix || '') && !!x.audioOnly === !!c.audioOnly) !== i);
 
   const running = job && !job.finished;
-  const canStart = ff?.ok && ff.libass && opt.targets.length && !running;
+  const canStart = ff?.ok && ff.libass && opt.targets.length && sel.length && !dupSuffix && !running;
   const start = async () => {
     try {
       if (dirty) await onSave();
-      await onStart(opt);
+      await onStart({ ...opt, combos: sel.map((c) => c.id) });
     } catch (e) { say(`내보내기 시작 실패: ${e.message}`, 'err'); }
   };
 
@@ -215,8 +229,8 @@ export function ExportModal({ summaries, titles, dirty, onSave, job, onStart, on
             const pct = Math.round((it.progress || 0) * 100);
             const eta = it.speed && it.total ? ((1 - (it.progress || 0)) * it.total) / it.speed : null;
             return (
-              <div key={it.key} className={`jobitem ${it.status}`}>
-                <div className="jh"><b>{titles[it.key]}</b>
+              <div key={it.id} className={`jobitem ${it.status}`}>
+                <div className="jh"><b>{titles[it.key]}{it.combo?.name && <span className="muted"> · {it.combo.name}{it.combo.audioOnly ? ' (오디오만)' : ''}</span>}</b>
                   <span className="jst">{{ queued: '대기', preparing: '준비 중', encoding: `인코딩 ${pct}%`, done: '완료', error: '실패', canceled: '취소됨' }[it.status]}</span></div>
                 <div className="bar"><div style={{ width: `${it.status === 'done' ? 100 : pct}%` }} /></div>
                 <div className="jm muted">
@@ -227,11 +241,13 @@ export function ExportModal({ summaries, titles, dirty, onSave, job, onStart, on
                 {it.status === 'done' && (
                   <div className="jact">
                     <code className="path">{it.out}</code>
-                    <button onClick={() => setPreview(preview === it.key ? null : it.key)}>{preview === it.key ? '미리보기 닫기' : '▶ 미리보기'}</button>
+                    <button onClick={() => setPreview(preview === it.id ? null : it.id)}>{preview === it.id ? '미리보기 닫기' : '▶ 미리보기'}</button>
                     <button onClick={() => post('/api/open', { path: it.out }).catch((e) => say(e.message, 'err'))}>📂 폴더에서 보기</button>
                   </div>
                 )}
-                {preview === it.key && <video className="pv" src={`/api/export/${job.id}/file/${it.key}`} controls autoPlay />}
+                {preview === it.id && (it.audioOnly
+                  ? <audio className="pv" src={`/api/export/${job.id}/file/${it.id}`} controls autoPlay />
+                  : <video className="pv" src={`/api/export/${job.id}/file/${it.id}`} controls autoPlay />)}
               </div>
             );
           })}
@@ -241,24 +257,47 @@ export function ExportModal({ summaries, titles, dirty, onSave, job, onStart, on
         <div className="exp">
           <div className="targets">
             {keys.map((k) => {
-              const s = summaries[k];
-              const warn = s.none + s.stale > 0 || s.overlaps > 0;
+              const per = usedAudio.length ? usedAudio : [tracks[0].id];
+              const s0 = summaries[k][per[0]];
+              const warn = per.some((t) => { const s = summaries[k][t]; return s.none + s.stale > 0 || s.overlaps > 0; });
               return (
                 <label key={k} className={`target ${opt.targets.includes(k) ? 'on' : ''}`}>
                   <input type="checkbox" checked={opt.targets.includes(k)} onChange={() => toggle(k)} />
                   <div>
-                    <b>{titles[k]}</b> <span className="muted">· {fmt(s.total)}</span>
-                    <div className="tchips">
-                      <span className="c ok">나레이션 {s.ok}/{s.count}</span>
-                      {s.stale > 0 && <span className="c warn">변경 미반영 {s.stale}</span>}
-                      {s.none > 0 && <span className="c warn">미생성 {s.none}</span>}
-                      {s.overlaps > 0 && <span className="c err">겹침 {s.overlaps}</span>}
-                    </div>
+                    <b>{titles[k]}</b> <span className="muted">· {fmt(s0.total)}</span>
+                    {per.map((t) => { const s = summaries[k][t]; return (
+                      <div key={t} className="tchips">
+                        <span className="c ok">{tracks.length > 1 ? tname(t) : '나레이션'} {s.ok}/{s.count}</span>
+                        {s.stale > 0 && <span className="c warn">변경 미반영 {s.stale}</span>}
+                        {s.none > 0 && <span className="c warn">미생성 {s.none}</span>}
+                        {s.overlaps > 0 && <span className="c err">겹침 {s.overlaps}</span>}
+                      </div>); })}
                     {warn && opt.tts && <small className="muted">미생성 줄은 자막만, 변경 미반영 줄은 이전 음성으로 들어갑니다.</small>}
                   </div>
                 </label>
               );
             })}
+          </div>
+
+          <div className="combos">
+            <div className="combos-h"><b>내보내기 조합</b><span className="muted">음성 트랙 × 자막 트랙 — 선택한 조합마다 파일이 하나씩 나옵니다</span><span className="grow" />
+              <button className="ghost sm" onClick={addC}>＋ 조합</button></div>
+            {combos.map((c) => (
+              <div key={c.id} className={`combo ${(opt.combos || []).includes(c.id) ? 'on' : ''}`}>
+                <input type="checkbox" checked={(opt.combos || []).includes(c.id)} onChange={() => toggleC(c.id)} />
+                <input className="cname" value={c.name} onChange={(e) => editC(c.id, { name: e.target.value })} placeholder="이름" />
+                <label>음성<select value={c.audio || ''} onChange={(e) => editC(c.id, { audio: e.target.value || null })}>
+                  {tracks.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}<option value="">없음 (게임 소리만)</option></select></label>
+                <label title={c.audioOnly ? '오디오만 내보낼 때는 자막이 들어가지 않음' : '영상에 번인할 자막'}>자막<select value={c.subs || ''} disabled={c.audioOnly} onChange={(e) => editC(c.id, { subs: e.target.value || null })}>
+                  {tracks.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}<option value="">없음</option></select></label>
+                <label title="파일명 끝에 붙는 글자 (…_편집본 + 접미사 .mp4)">접미사<input className="csuf" value={c.suffix || ''} placeholder="(없음)" onChange={(e) => editC(c.id, { suffix: e.target.value })} /></label>
+                <label className="chk" title="영상 없이 같은 길이의 최종 오디오(게임 소리 + 이 트랙 나레이션)만 .m4a로 — 유튜브 다국어 오디오 트랙용">
+                  <input type="checkbox" checked={!!c.audioOnly} onChange={(e) => editC(c.id, { audioOnly: e.target.checked })} />오디오만</label>
+                <button className="ghost" title="조합 삭제" disabled={combos.length < 2} onClick={() => { setCombos((cs) => cs.filter((x) => x.id !== c.id)); set('combos', (opt.combos || []).filter((x) => x !== c.id)); }}>✕</button>
+              </div>
+            ))}
+            {dupSuffix && <div className="callout err">선택한 조합끼리 파일명 접미사가 같아 서로 덮어씁니다. 접미사를 다르게 하세요.</div>}
+            {sel.some((c) => c.audioOnly) && <p className="hint">오디오만: 유튜브 스튜디오 → 영상 → 언어 → 오디오 추가에 올리는 파일입니다. 영상 화면(카드 글자)은 그대로이니 글자가 적은 카드에 어울립니다.</p>}
           </div>
 
           <div className="ogrid">
@@ -278,7 +317,7 @@ export function ExportModal({ summaries, titles, dirty, onSave, job, onStart, on
             <label className="chk"><input type="checkbox" checked={opt.srt} onChange={(e) => set('srt', e.target.checked)} />SRT 자막 파일도 저장 (유튜브 업로드용)</label>
           </div>
           <div className="outinfo muted">
-            저장 위치 <code>{cfg?.outDir || '…'}</code> · 파일명 <code>…_편집본.mp4</code> (같은 이름은 덮어씀)
+            저장 위치 <code>{cfg?.outDir || '…'}</code> · 파일명 <code>…_편집본 + 접미사 .mp4 / .m4a</code> (같은 이름은 덮어씀)
             {!ff && <> · ffmpeg 확인 중…</>}
           </div>
         </div>

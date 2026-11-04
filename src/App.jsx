@@ -22,6 +22,8 @@ import ProjectSettings from './project/ProjectSettings.jsx';
 import CardInspector from './cards/CardInspector.jsx';
 import CardEditOverlay from './cards/CardEditOverlay.jsx';
 import { cardInstances, cardFocusTime, newCardText, newCardRect, newCardGrad } from '../shared/cards.js';
+import { MAIN, DEFAULT_VOICE, DEFAULT_VS, trackOf, trackList, trackCfg, patchTrackCfg, nextLineId, exportCombos, applyDict } from '../shared/tracks.js';
+import TrackModal from './TrackModal.jsx';
 const mergeLayer = (l, p = {}) => { const o = { ...l }; for (const [k, v] of Object.entries(p)) o[k] = v && typeof v === 'object' && !Array.isArray(v) && l[k] && typeof l[k] === 'object' ? { ...l[k], ...v } : v; return o; };
 
 // API 키로 /v1/models 를 불러오면 계정에서 쓸 수 있는 목록으로 교체됨
@@ -41,15 +43,6 @@ const modelCaps = (id = '') => {
 };
 const pickVS = (vs, model) => Object.fromEntries(modelCaps(model).keys.filter((k) => vs[k] != null).map((k) => [k, vs[k]]));
 
-// 발음 사전: 자막 → 발음 텍스트 자동 치환 (긴 단어 우선)
-function applyDict(text, rules = []) {
-  let out = text || '';
-  [...rules].filter((r) => r.from).sort((a, b) => b.from.length - a.from.length).forEach((r) => {
-    out = out.split(r.from).join(r.to ?? '');
-  });
-  return out;
-}
-
 // 기본 톤 프리셋 (Eleven v3/v4 오디오 태그 — 영어 지시어가 가장 안정적)
 const TONE_PRESETS = [
   ['나레이션', '[narrator]'], ['차분한', '[calm]'], ['자신감 있는', '[confident]'], ['진지한', '[serious]'],
@@ -57,7 +50,8 @@ const TONE_PRESETS = [
   ['긴박한', '[tense]'], ['천천히', '[slow pace]'],
 ];
 const parseTags = (s = '') => (s.match(/\[[^\]]+\]/g) || []);
-const DEFAULT_VS = { stability: 0.5, similarity_boost: 0.75, style: 0, use_speaker_boost: true, speed: 1 };
+// 불러온 보이스 설정에 빠진 기본값 채우기 (기본 트랙·추가 트랙 공통)
+const fillVoice = (v = {}) => ({ ...DEFAULT_VOICE, ...v, tone: { ...DEFAULT_VOICE.tone, ...(v.tone || {}) } });
 
 async function api(url, { key, ...opt } = {}) {
   const r = await fetch(url, { ...opt, headers: { ...(opt.headers || {}), ...(key ? { 'x-el-key': key } : {}) } });
@@ -80,7 +74,6 @@ function deepMergeObj(a = {}, b = {}) {
 }
 
 
-const nextNum = (arr) => Math.max(0, ...arr.map((l) => parseInt((/(\d+)$/.exec(l.id) || [])[1], 10)).filter(Number.isFinite)) + 1;
 const nextKey = (s) => { for (const c of 'ABCDEFGHIJKLMNOPQRSTUVWXYZ') if (!s.meta?.[c] && !s[c]) return c; return `V${Date.now().toString(36)}`; };
 
 export default function App({ project }) {
@@ -206,9 +199,9 @@ export default function App({ project }) {
   useEffect(() => {
     api('/api/script').then((s) => {
       s.voice_settings = { ...DEFAULT_VS, ...(s.voice_settings || {}) };
-      s.voice = { model_id: 'eleven_v4', voice_id: '', language_code: 'ko', ...(s.voice || {}) };
+      s.voice = fillVoice(s.voice);
       s.pronunciation = s.pronunciation || [];
-      s.voice.tone = { enabled: false, tags: '[narrator][calm]', override: true, ...(s.voice.tone || {}) };
+      if (s.tracks) s.tracks = s.tracks.map((t) => (t.id === MAIN ? t : { ...t, voice: fillVoice(t.voice), voice_settings: { ...DEFAULT_VS, ...(t.voice_settings || {}) }, pronunciation: t.pronunciation || [] }));
       setScript(s);
     }).catch((e) => say(`대본 로드 실패: ${e.message}`, 'err'));
     refreshTts().catch((e) => say(`TTS 목록 로드 실패: ${e.message}`, 'err'));
@@ -284,24 +277,34 @@ export default function App({ project }) {
   const meta = script?.meta?.[tab];
   const tl = useMemo(() => buildTimeline(meta?.segs, meta?.end_card ?? 4), [meta]);
   bodyRef.current = tl.body;
-  const lines = useMemo(() => [...(script?.[tab] || [])].sort((a, b) => a.start - b.start), [script, tab]);
+  // 나레이션 트랙: 편집 중인 트랙의 대사만 목록·타임라인·미리보기에 쓰고, 보이스·발음 사전도 그 트랙 것
+  const tracks = trackList(script);
+  const [trackSel, setTrackSel] = useState(() => ls.get('zk.track', MAIN));
+  const track = tracks.some((t) => t.id === trackSel) ? trackSel : tracks[0].id;
+  useEffect(() => { ls.set('zk.track', track); }, [track]);
+  const [tmodal, setTmodal] = useState(null); // { mode: 'add' | 'edit', id? }
+  const cfg = useMemo(() => trackCfg(script, track), [script, track]);
+  const lines = useMemo(() => (script?.[tab] || []).filter((l) => trackOf(l) === track).sort((a, b) => a.start - b.start), [script, tab, track]);
   const insts = useMemo(() => cardInstances(C.cards, { meta: meta || {}, offs: tl.parts.map((p) => p.off), body: tl.body, total: tl.total, project: script?.project }), [C.cards, meta, tl, script?.project]);
   const setMeta = useCallback((fn) => { setScript((s) => ({ ...s, meta: { ...s.meta, [tab]: fn(s.meta[tab]) } })); setDirty(true); }, [tab]);
 
+  // 줄이 속한 트랙의 보이스·사전 (다른 트랙 줄의 상태 계산에도 쓰임)
+  const cfgOf = useCallback((l) => trackCfg(script, trackOf(l)), [script]);
   // 실제로 TTS에 보낼 텍스트: 발음 입력이 있으면 그것, 없으면 자막에 발음 사전 적용
-  const ttsText = useCallback((l) => (l.tts?.trim() ? l.tts : applyDict(l.text, script?.pronunciation)), [script?.pronunciation]);
+  const ttsText = useCallback((l) => (l.tts?.trim() ? l.tts : applyDict(l.text, cfgOf(l).pronunciation)), [cfgOf]);
 
   // 실제 ElevenLabs로 보내는 텍스트 = (기본 톤 태그) + 발음 텍스트
-  const toneTags = (() => {
-    const t = script?.voice?.tone; const id = script?.voice?.model_id || '';
+  const toneOf = (voice) => {
+    const t = voice?.tone; const id = voice?.model_id || '';
     return t?.enabled && (id.startsWith('eleven_v4') || id.startsWith('eleven_v3')) ? parseTags(t.tags).join('') : '';
-  })();
+  };
+  const toneTags = toneOf(cfg.voice);
   const sendText = useCallback((l) => {
-    const base = ttsText(l);
-    if (!toneTags || !base.trim()) return base;
-    if (script?.voice?.tone?.override && /^\s*\[/.test(base)) return base; // 줄 자체 태그가 우선
-    return `${toneTags} ${base}`;
-  }, [ttsText, toneTags, script?.voice?.tone?.override]);
+    const base = ttsText(l); const v = cfgOf(l).voice; const tags = toneOf(v);
+    if (!tags || !base.trim()) return base;
+    if (v.tone?.override && /^\s*\[/.test(base)) return base; // 줄 자체 태그가 우선
+    return `${tags} ${base}`;
+  }, [ttsText, cfgOf]);
 
   const durOf = useCallback((l) => {
     const info = tts[l.id];
@@ -315,10 +318,11 @@ export default function App({ project }) {
     const m = info.meta;
     if (!m) return 'ok';
     if ((m.tts_text ?? m.text) !== sendText(l)) return 'stale';
-    if (script?.voice?.voice_id && m.voice_id !== script.voice.voice_id) return 'voice';
-    if (m.model_id && script?.voice?.model_id && m.model_id !== script.voice.model_id) return 'voice';
+    const v = cfgOf(l).voice;
+    if (v.voice_id && m.voice_id !== v.voice_id) return 'voice';
+    if (m.model_id && v.model_id && m.model_id !== v.model_id) return 'voice';
     return 'ok';
-  }, [tts, script, sendText]);
+  }, [tts, cfgOf, sendText]);
 
   const warnings = useMemo(() => {
     const w = {};
@@ -354,17 +358,66 @@ export default function App({ project }) {
     setScript((s) => ({ ...s, [tab]: s[tab].map((l) => (l.id === id ? { ...l, start } : l)) })); setDirty(true);
   }, [tab]);
   const addLine = () => {
-    const id = `${tab}${String(nextNum(script[tab])).padStart(2, '0')}`;
-    setScript((s) => ({ ...s, [tab]: [...s[tab], { id, start: Math.round(editTime * 10) / 10, text: '' }] }));
+    const id = nextLineId(script, tab, track);
+    setScript((s) => ({ ...s, [tab]: [...s[tab], { id, start: Math.round(editTime * 10) / 10, text: '', ...(track !== MAIN ? { track } : {}) }] }));
     setSel(id); setDirty(true);
   };
   const removeLine = (id) => {
     if (!window.confirm(`${id} 대사를 삭제할까요? (생성된 mp3는 남습니다)`)) return;
     setScript((s) => ({ ...s, [tab]: s[tab].filter((l) => l.id !== id) })); setDirty(true);
   };
-  const setVS = (k, v) => { setScript((s) => ({ ...s, voice_settings: { ...s.voice_settings, [k]: v } })); setDirty(true); };
-  const setVoice = (k, v) => { setScript((s) => ({ ...s, voice: { ...s.voice, [k]: v } })); setDirty(true); };
-  const setRules = (fn) => { setScript((s) => ({ ...s, pronunciation: fn(s.pronunciation || []) })); setDirty(true); };
+  // 보이스·설정·발음 사전은 편집 중인 트랙 것을 바꿈
+  const setVS = (k, v) => { setScript((s) => patchTrackCfg(s, track, 'voice_settings', (x) => ({ ...x, [k]: v }))); setDirty(true); };
+  const setVoice = (k, v) => { setScript((s) => patchTrackCfg(s, track, 'voice', (x) => ({ ...x, [k]: v }))); setDirty(true); };
+  const setRules = (fn) => { setScript((s) => patchTrackCfg(s, track, 'pronunciation', (x) => fn(x || []))); setDirty(true); };
+
+  // ---------- 트랙 추가·복제·이름·삭제 ----------
+  // 첫 추가 때 기본 트랙도 목록에 올림. copyFrom: 대사(시작 시각 포함)를 복제, translated: { 영상키: { 원본id: 번역 } }
+  const saveTrack = ({ id, name, copyFrom, copyVoice, translated, language_code }) => {
+    setScript((s) => {
+      const list = trackList(s);
+      if (list.some((t) => t.id === id)) return { ...s, tracks: list.map((t) => (t.id === id ? { ...t, name } : t)) };
+      const base = copyVoice ? trackCfg(s, copyFrom || MAIN) : trackCfg({}, MAIN);
+      const voice = { ...fillVoice(base.voice), ...(language_code ? { language_code } : {}) };
+      const t = { id, name, voice, voice_settings: { ...DEFAULT_VS, ...base.voice_settings }, pronunciation: translated ? [] : [...(base.pronunciation || [])] };
+      const n = { ...s, tracks: [...list, t] };
+      if (copyFrom) for (const k of s.videos || []) {
+        const add = [];
+        for (const l of (s[k] || []).filter((x) => trackOf(x) === copyFrom).sort((a, b) => a.start - b.start)) {
+          add.push({ id: nextLineId({ [k]: add }, k, id), start: l.start, text: translated?.[k]?.[l.id] ?? l.text, track: id,
+            ...(!translated && l.tts ? { tts: l.tts } : {}) });
+        }
+        n[k] = [...(s[k] || []), ...add];
+      }
+      return n;
+    });
+    setTrackSel(id); setDirty(true);
+  };
+  const deleteTrack = (id) => {
+    if (id === MAIN) return;
+    const n = (script.videos || []).reduce((c, k) => c + (script[k] || []).filter((l) => trackOf(l) === id).length, 0);
+    if (!window.confirm(`'${tracks.find((t) => t.id === id)?.name}' 트랙과 대사 ${n}줄을 지울까요? (생성된 mp3는 남습니다)`)) return;
+    setScript((s) => {
+      const o = { ...s, tracks: s.tracks.filter((t) => t.id !== id) };
+      for (const k of s.videos || []) o[k] = (s[k] || []).filter((l) => trackOf(l) !== id);
+      if (o.exports) o.exports = o.exports.filter((c) => c.audio !== id && c.subs !== id);
+      return o;
+    });
+    setTrackSel(MAIN); setTmodal(null); setDirty(true);
+  };
+  const translateTrack = async (from, lang) => {
+    const key = keys[ai.provider];
+    if (!key) throw new Error('설정에서 AI API 키를 등록하세요');
+    if (dirty) await save();
+    const out = {};
+    for (const k of script.videos || []) {
+      const r = await api('/api/tracks/translate', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-ai-key': key },
+        body: JSON.stringify({ key: k, from, lang, provider: ai.provider, model: ai.model }) });
+      out[k] = Object.fromEntries((r.lines || []).map((x) => [x.id, x.text]));
+      say(`${script.meta[k]?.title || k} 대사 ${r.lines?.length || 0}줄 번역됨`, 'ok');
+    }
+    return out;
+  };
 
   const save = useCallback(async (s = script) => {
     await api('/api/script', { method: 'PUT', body: JSON.stringify(s, null, 2), headers: { 'Content-Type': 'application/json' } });
@@ -395,14 +448,15 @@ export default function App({ project }) {
 
   const generate = async (l, all = lines) => {
     const i = all.findIndex((x) => x.id === l.id);
+    const { voice: v, voice_settings: vs } = cfgOf(l);
     setBusy((b) => ({ ...b, [l.id]: 'gen' }));
     try {
       await api(`/api/tts/${l.id}`, {
         method: 'POST', key: apiKey, headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          text: sendText(l), subtitle: l.text, voice_id: script.voice.voice_id, model_id: script.voice.model_id,
-          voice_settings: pickVS(script.voice_settings, script.voice.model_id),
-          language_code: modelCaps(script.voice.model_id).lang ? script.voice.language_code || undefined : undefined,
+          text: sendText(l), subtitle: l.text, voice_id: v.voice_id, model_id: v.model_id,
+          voice_settings: pickVS(vs, v.model_id),
+          language_code: modelCaps(v.model_id).lang ? v.language_code || undefined : undefined,
           previous_text: context && all[i - 1] ? ttsText(all[i - 1]) : undefined,
           next_text: context && all[i + 1] ? ttsText(all[i + 1]) : undefined,
         }),
@@ -425,14 +479,14 @@ export default function App({ project }) {
 
   const preflight = () => {
     if (!apiKey) { say('설정에서 ElevenLabs API 키를 등록하세요', 'err'); setModal('settings'); return false; }
-    if (!script.voice.voice_id) { say('보이스를 선택하세요', 'err'); return false; }
+    if (!cfg.voice.voice_id) { say(`'${tracks.find((t) => t.id === track)?.name}' 트랙의 보이스를 선택하세요`, 'err'); return false; }
     return true;
   };
 
   const runBatch = async (scope, onlyMissing) => {
     if (!preflight()) return;
     const keys = scope === 'all' ? [...(script.videos || [])] : [tab];
-    const targets = keys.flatMap((k) => [...script[k]].sort((a, b) => a.start - b.start).map((l, _, arr) => ({ l, arr })))
+    const targets = keys.flatMap((k) => script[k].filter((l) => trackOf(l) === track).sort((a, b) => a.start - b.start).map((l, _, arr) => ({ l, arr })))
       .filter(({ l }) => ttsText(l).trim() && (!onlyMissing || statusOf(l) !== 'ok'));
     if (!targets.length) { say('생성할 대사가 없습니다', 'ok'); return; }
     const chars = targets.reduce((n, { l }) => n + sendText(l).length, 0);
@@ -518,7 +572,7 @@ export default function App({ project }) {
     setShot({ t });
     try {
       if (dirty) await save();
-      const r = await fetch(`/api/frame?key=${tab}&t=${t.toFixed(2)}&w=${Math.min(2560, Math.round(frameRect.w * (window.devicePixelRatio || 1)))}`);
+      const r = await fetch(`/api/frame?key=${tab}&track=${track}&t=${t.toFixed(2)}&w=${Math.min(2560, Math.round(frameRect.w * (window.devicePixelRatio || 1)))}`);
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
       const url = URL.createObjectURL(await r.blob());
       setShot((s) => (s && s.t === t ? { t, url } : s));
@@ -617,10 +671,13 @@ export default function App({ project }) {
     const scriptOps = ops.filter((op) => ['update', 'add', 'delete', 'rule_add', 'rule_remove'].includes(op.op));
     if (!scriptOps.length) return;
     ops = scriptOps;
-    setScript((s) => {
-      let n = { ...s, A: [...s.A], B: [...s.B], pronunciation: [...(s.pronunciation || [])] };
+    setScript((s0) => {
+      // 사전 규칙은 편집 중인 트랙의 사전에, 새 대사도 편집 중인 트랙에
+      let dict = [...(trackCfg(s0, track).pronunciation || [])];
+      const n = { ...s0 };
+      for (const v of s0.videos || []) n[v] = [...(s0[v] || [])];
       for (const op of ops) {
-        const k = op.id ? (n.A.some((l) => l.id === op.id) ? 'A' : n.B.some((l) => l.id === op.id) ? 'B' : null) : null;
+        const k = op.id ? (s0.videos || []).find((v) => n[v].some((l) => l.id === op.id)) || null : null;
         if (op.op === 'update' && k) {
           const patch = {};
           if (op.text != null) patch.text = op.text;
@@ -631,15 +688,15 @@ export default function App({ project }) {
           n[k] = n[k].filter((l) => l.id !== op.id);
         } else if (op.op === 'add') {
           const t = (script.videos || []).includes(op.tab) ? op.tab : tab;
-          const id = `${t}${String(nextNum(n[t])).padStart(2, '0')}`;
-          n[t] = [...n[t], { id, start: Math.round((+op.start || 0) * 10) / 10, text: op.text || '', ...(op.tts ? { tts: op.tts } : {}) }];
+          const id = nextLineId(n, t, track);
+          n[t] = [...n[t], { id, start: Math.round((+op.start || 0) * 10) / 10, text: op.text || '', ...(op.tts ? { tts: op.tts } : {}), ...(track !== MAIN ? { track } : {}) }];
         } else if (op.op === 'rule_add' && op.from) {
-          n.pronunciation = [...n.pronunciation.filter((r) => r.from !== op.from), { from: op.from, to: op.to ?? '' }];
+          dict = [...dict.filter((r) => r.from !== op.from), { from: op.from, to: op.to ?? '' }];
         } else if (op.op === 'rule_remove') {
-          n.pronunciation = n.pronunciation.filter((r) => r.from !== op.from);
+          dict = dict.filter((r) => r.from !== op.from);
         }
       }
-      return n;
+      return patchTrackCfg(n, track, 'pronunciation', () => dict);
     });
     setDirty(true);
   };
@@ -655,7 +712,7 @@ export default function App({ project }) {
     if (side === 'cards') {
       try {
         if (dirty) await save();
-        const r = await fetch(`/api/frame?key=${tab}&t=${editTime.toFixed(2)}&w=1280`); if (!r.ok) return null;
+        const r = await fetch(`/api/frame?key=${tab}&track=${track}&t=${editTime.toFixed(2)}&w=1280`); if (!r.ok) return null;
         const b = await r.blob();
         return await new Promise((ok) => { const fr = new FileReader(); fr.onload = () => ok(fr.result); fr.readAsDataURL(b); });
       } catch { return null; }
@@ -727,29 +784,30 @@ export default function App({ project }) {
     });
     const act = lines.find((l) => editTime >= l.start && editTime < l.start + durOf(l) + SUB_TAIL);
     return [
+      `편집 중인 나레이션 트랙: ${tracks.find((t) => t.id === track)?.name} (언어 코드 ${cfg.voice.language_code || '미지정'}). 자막·발음 텍스트는 이 트랙의 언어로 쓴다. 다른 트랙의 대사는 건드리지 않는다.`,
       '나레이션 톤: 프로젝트 설명의 톤을 따른다. 화면/대본에서 알 수 없는 내용은 단정하지 말고 추측이라고 밝힐 것.',
       '대사 편집 규칙 (op=update/add/delete/rule_add/rule_remove)',
       '- text = 화면 자막(표기 그대로, 영어 고유명사 허용). 한 줄 약 30자, 최대 2줄 권장.',
       '- tts = TTS 발음 텍스트. 비어 있으면 발음 사전이 자막에 적용된 값이 쓰인다. 반복되는 표기는 rule_add로 사전에 넣고, 한 줄만 다른 경우에만 tts를 쓴다. tts를 자동으로 되돌리려면 빈 문자열.',
-      `- TTS 모델: ${script.voice.model_id}. ${modelCaps(script.voice.model_id).tags ? 'SSML 미지원, 대신 tts 안에 [excited] [whispers] 같은 오디오 태그 사용 가능(자막에는 넣지 말 것).' : 'SSML/오디오 태그 사용 금지.'} 영문 약어·숫자·기호는 tts에서 한글 읽기로.`,
-      toneTags ? `- 기본 톤 태그 ${toneTags} 가 모든 발음 텍스트 앞에 자동으로 붙는다(줄 tts가 태그로 시작하면 ${script.voice.tone.override ? '그 줄은 기본 톤 대신 자체 태그 사용' : '기본 톤 뒤에 추가'}). 같은 태그를 tts에 중복해서 넣지 말 것. 특정 줄만 톤을 바꾸고 싶을 때만 tts 앞에 태그.` : '- 기본 톤 태그 없음.',
-      '- 한국어 TTS는 약 초당 7자. 대사 end + 0.3초 < 다음 대사 start 가 되도록. start는 편집본 기준 초(0.1 단위).',
+      `- TTS 모델: ${cfg.voice.model_id}. ${modelCaps(cfg.voice.model_id).tags ? 'SSML 미지원, 대신 tts 안에 [excited] [whispers] 같은 오디오 태그 사용 가능(자막에는 넣지 말 것).' : 'SSML/오디오 태그 사용 금지.'} ${(cfg.voice.language_code || 'ko') === 'ko' ? '영문 약어·숫자·기호는 tts에서 한글 읽기로.' : '약어·숫자·기호는 tts에서 그 언어로 읽는 법으로.'}`,
+      toneTags ? `- 기본 톤 태그 ${toneTags} 가 모든 발음 텍스트 앞에 자동으로 붙는다(줄 tts가 태그로 시작하면 ${cfg.voice.tone.override ? '그 줄은 기본 톤 대신 자체 태그 사용' : '기본 톤 뒤에 추가'}). 같은 태그를 tts에 중복해서 넣지 말 것. 특정 줄만 톤을 바꾸고 싶을 때만 tts 앞에 태그.` : '- 기본 톤 태그 없음.',
+      '- TTS 속도: 한국어 약 초당 7자, 영어 약 초당 2.5단어. 대사 end + 0.3초 < 다음 대사 start 가 되도록. start는 편집본 기준 초(0.1 단위).',
       `- 편집본 길이 ${tl.total.toFixed(1)}초, ${tl.body.toFixed(1)}초부터 엔딩 카드(검은 화면). 첫 5.6초는 타이틀 카드가 화면을 덮는다.`,
       '',
       `현재 영상: ${tab} = ${meta?.title}`,
       chapters.length ? `챕터(편집본 시각): ${JSON.stringify(chapters)}` : '챕터 없음',
       `재생 위치: ${editTime.toFixed(1)}초${act ? `, 현재 자막 ${act.id}` : ''}${sel ? `, 선택된 대사 ${sel}` : ''}`,
-      `발음 사전: ${JSON.stringify(script.pronunciation || [])}`,
-      ...(script.videos || []).filter((k) => k !== tab).map((k) => `다른 영상 ${k}(${script.meta?.[k]?.title || ''}) 대사 id들: ${(script[k] || []).map((l) => l.id).join(', ')} (요청 시에만 수정)`),
+      `발음 사전: ${JSON.stringify(cfg.pronunciation)}`,
+      ...(script.videos || []).filter((k) => k !== tab).map((k) => `다른 영상 ${k}(${script.meta?.[k]?.title || ''}) 대사 id들: ${(script[k] || []).filter((l) => trackOf(l) === track).map((l) => l.id).join(', ')} (요청 시에만 수정)`),
       `대사 목록: ${JSON.stringify(L)}`,
       '사용자 메시지에 이미지가 있으면 그것은 현재 재생 위치의 영상 화면이다.',
     ].join('\n');
   };
 
   // ---------- 내보내기 ----------
-  const summaryOf = (k) => {
+  const summaryOf = (k, tid) => {
     const m = script?.meta?.[k]; const T = buildTimeline(m?.segs, m?.end_card ?? 4);
-    const L = [...(script?.[k] || [])].sort((a, b) => a.start - b.start);
+    const L = (script?.[k] || []).filter((l) => trackOf(l) === tid).sort((a, b) => a.start - b.start);
     const r = { count: L.length, ok: 0, stale: 0, none: 0, overlaps: 0, total: T.total };
     L.forEach((l, i) => {
       const st = statusOf(l); if (st === 'ok') r.ok++; else if (st === 'none') r.none++; else r.stale++;
@@ -760,8 +818,9 @@ export default function App({ project }) {
   const startExport = async (opt) => {
     if (!opt) { setExportJob(null); return; }
     const { id } = await api('/api/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(opt) });
-    setExportJob({ id, items: opt.targets.map((k) => ({ key: k, status: 'queued', progress: 0 })), finished: false });
-    say(`내보내기 시작 (${opt.targets.join(', ')})`, 'ok');
+    const combos = exportCombos(script).filter((c) => opt.combos.includes(c.id));
+    setExportJob({ id, items: opt.targets.flatMap((k) => combos.map((c) => ({ id: `${k}__${c.id}`, key: k, combo: c, status: 'queued', progress: 0 }))), finished: false });
+    say(`내보내기 시작 (${opt.targets.length}개 영상 × ${combos.length}개 조합)`, 'ok');
   };
   const cancelExport = async () => { if (exportJob?.id) await api(`/api/export/${exportJob.id}/cancel`, { method: 'POST' }).catch(() => {}); };
 
@@ -786,6 +845,9 @@ export default function App({ project }) {
     {vmodal && <VideoModal vkey={vmodal.key} meta={vmodal.key ? script.meta[vmodal.key] : null} isNew={!!vmodal.isNew} say={say}
       onSave={(m) => saveVideo(m, vmodal.isNew ? null : vmodal.key)} onDelete={() => deleteVideo(vmodal.key)} onClose={() => setVmodal(null)} />}
     {phome && <ProjectHome asModal onClose={() => setPhome(false)} />}
+    {tmodal && <TrackModal mode={tmodal.mode} track={tracks.find((t) => t.id === tmodal.id)} tracks={tracks} current={track}
+      onSave={(t) => { saveTrack(t); setTmodal(null); }} onDelete={deleteTrack} onTranslate={translateTrack}
+      aiReady={!!keys[ai.provider]} onClose={() => setTmodal(null)} say={say} />}
     {modal === 'project' && <ProjectSettings project={script.project || {}} onChange={setProject} dirty={dirty} onSave={() => save()} onClose={() => setModal(null)} say={say} />}
   </>);
   const headerEl = (
@@ -834,10 +896,10 @@ export default function App({ project }) {
     .filter((c) => editTime >= c.at && editTime < c.at + 6).pop();
   const counts = lines.reduce((m, l) => { const s = statusOf(l); m[s] = (m[s] || 0) + 1; return m; }, {});
   const todoChars = lines.filter((l) => statusOf(l) !== 'ok').reduce((n, l) => n + sendText(l).length, 0);
-  const caps = modelCaps(script.voice.model_id);
-  const modelList = models.some((m) => m.model_id === script.voice.model_id) ? models
-    : [{ model_id: script.voice.model_id, name: script.voice.model_id }, ...models];
-  const voiceName = voices.find((v) => v.voice_id === script.voice.voice_id)?.name;
+  const caps = modelCaps(cfg.voice.model_id);
+  const modelList = models.some((m) => m.model_id === cfg.voice.model_id) ? models
+    : [{ model_id: cfg.voice.model_id, name: cfg.voice.model_id }, ...models];
+  const voiceName = voices.find((v) => v.voice_id === cfg.voice.voice_id)?.name;
 
   return (
     <div className="app">
@@ -848,7 +910,7 @@ export default function App({ project }) {
           <nav className="tabs">
             {script.videos.map((k) => (
               <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)} onDoubleClick={() => setVmodal({ key: k })} title="더블클릭: 영상 설정">
-                {script.meta[k]?.title || k}<small>{(script[k] || []).length}</small>
+                {script.meta[k]?.title || k}<small>{(script[k] || []).filter((l) => trackOf(l) === track).length}</small>
                 {tab === k && <i className="vset" title="영상 설정 (파일·구간·챕터)" onClick={(e) => { e.stopPropagation(); setVmodal({ key: k }); }}>⚙</i>}
               </button>
             ))}
@@ -888,7 +950,7 @@ export default function App({ project }) {
             )}
           </div>
 
-          <Timeline tl={tl} lines={lines} durOf={durOf} statusOf={statusOf} warnings={warnings} playing={playing}
+          <Timeline tl={tl} lines={lines} trackName={tracks.length > 1 ? tracks.find((t) => t.id === track)?.name : null} durOf={durOf} statusOf={statusOf} warnings={warnings} playing={playing}
             editTime={editTime} sel={sel} onSeek={seek} onSel={(l, keep) => { setSel(l.id); if (!keep) seek(Math.max(0, l.start - 0.5)); }}
             onMove={moveLine} onDragStart={stop} onDrop={(id) => scrollToLine(id)}
             chapters={meta?.chapters || []} insts={insts} thumbs={T.list.filter((d) => d.key === tab)}
@@ -915,12 +977,12 @@ export default function App({ project }) {
 
           {side === 'cards' && <CardInspector C={C} st={clientStyle} fontsList={fontsList} onInstallFont={installFont} />}
           {side !== 'cards' && (<>
-          <Section id="voice" title="보이스" className="voice" defaultOpen={!script.voice.voice_id}
-            summary={`${voiceName || (script.voice.voice_id ? script.voice.voice_id.slice(0, 8) + '…' : '미선택')} · ${modelList.find((m) => m.model_id === script.voice.model_id)?.name || script.voice.model_id}${toneTags ? ` · 톤 ${toneTags}` : ''}`}>
+          <Section id="voice" title={tracks.length > 1 ? `보이스 · ${tracks.find((t) => t.id === track)?.name}` : '보이스'} className="voice" defaultOpen={!cfg.voice.voice_id}
+            summary={`${voiceName || (cfg.voice.voice_id ? cfg.voice.voice_id.slice(0, 8) + '…' : '미선택')} · ${modelList.find((m) => m.model_id === cfg.voice.model_id)?.name || cfg.voice.model_id}${toneTags ? ` · 톤 ${toneTags}` : ''}`}>
             <div className="row">
               <label className="field grow"><span>Voice {voiceName ? `· ${voiceName}` : ''}</span>
                 {voices.length ? (
-                  <select value={script.voice.voice_id} onChange={(e) => setVoice('voice_id', e.target.value)}>
+                  <select value={cfg.voice.voice_id} onChange={(e) => setVoice('voice_id', e.target.value)}>
                     <option value="">선택…</option>
                     {voices.map((v) => (
                       <option key={v.voice_id} value={v.voice_id}>
@@ -929,38 +991,38 @@ export default function App({ project }) {
                     ))}
                   </select>
                 ) : (
-                  <input value={script.voice.voice_id} placeholder="Voice ID 직접 입력 또는 ‘보이스 불러오기’" onChange={(e) => setVoice('voice_id', e.target.value.trim())} />
+                  <input value={cfg.voice.voice_id} placeholder="Voice ID 직접 입력 또는 ‘보이스 불러오기’" onChange={(e) => setVoice('voice_id', e.target.value.trim())} />
                 )}
               </label>
-              {voices.find((v) => v.voice_id === script.voice.voice_id)?.preview_url && (
-                <button onClick={() => new Audio(voices.find((v) => v.voice_id === script.voice.voice_id).preview_url).play()}>샘플 ▶</button>
+              {voices.find((v) => v.voice_id === cfg.voice.voice_id)?.preview_url && (
+                <button onClick={() => new Audio(voices.find((v) => v.voice_id === cfg.voice.voice_id).preview_url).play()}>샘플 ▶</button>
               )}
               <label className="field"><span>Model</span>
-                <select value={script.voice.model_id} onChange={(e) => setVoice('model_id', e.target.value)}>
+                <select value={cfg.voice.model_id} onChange={(e) => setVoice('model_id', e.target.value)}>
                   {modelList.map((m) => <option key={m.model_id} value={m.model_id}>{m.name}</option>)}
                 </select>
               </label>
               {caps.lang && (
                 <label className="field lang"><span>언어</span>
-                  <input value={script.voice.language_code || ''} placeholder="ko" onChange={(e) => setVoice('language_code', e.target.value.trim())} />
+                  <input value={cfg.voice.language_code || ''} placeholder="ko" onChange={(e) => setVoice('language_code', e.target.value.trim())} />
                 </label>
               )}
             </div>
             <div className="sliders">
               {[['stability', '안정성', 0, 1], ['similarity_boost', '유사도', 0, 1], ['style', '스타일 과장', 0, 1], ['speed', '속도', 0.7, 1.2]]
                 .filter(([k]) => caps.keys.includes(k)).map(([k, n, a, b]) => (
-                  <label key={k} className="field"><span>{n} <b>{Number(script.voice_settings[k]).toFixed(2)}</b></span>
-                    <input type="range" min={a} max={b} step="0.05" value={script.voice_settings[k]} onChange={(e) => setVS(k, +e.target.value)} />
+                  <label key={k} className="field"><span>{n} <b>{Number(cfg.voice_settings[k]).toFixed(2)}</b></span>
+                    <input type="range" min={a} max={b} step="0.05" value={cfg.voice_settings[k]} onChange={(e) => setVS(k, +e.target.value)} />
                   </label>
                 ))}
               <div className="checks">
                 {caps.keys.includes('use_speaker_boost') && (
-                  <label className="chk"><input type="checkbox" checked={!!script.voice_settings.use_speaker_boost} onChange={(e) => setVS('use_speaker_boost', e.target.checked)} />Speaker boost</label>
+                  <label className="chk"><input type="checkbox" checked={!!cfg.voice_settings.use_speaker_boost} onChange={(e) => setVS('use_speaker_boost', e.target.checked)} />Speaker boost</label>
                 )}
                 <label className="chk" title="앞뒤 대사의 발음 텍스트를 함께 보내 억양을 자연스럽게 이어줌"><input type="checkbox" checked={context} onChange={(e) => setContext(e.target.checked)} />앞뒤 문맥 연결</label>
               </div>
               {caps.tags ? (
-                <ToneEditor tone={script.voice.tone} onChange={(t) => setVoice('tone', { ...script.voice.tone, ...t })}
+                <ToneEditor tone={cfg.voice.tone} onChange={(t) => setVoice('tone', { ...cfg.voice.tone, ...t })}
                   sample={(lines.find((l) => l.id === sel) || lines[0]) ? sendText(lines.find((l) => l.id === sel) || lines[0]) : ''} />
               ) : (
                 <p className="hint">기본 톤(오디오 태그)은 Eleven v3/v4 모델에서만 쓸 수 있습니다.</p>
@@ -968,10 +1030,10 @@ export default function App({ project }) {
             </div>
           </Section>
 
-          <Section id="dict" title="발음 사전" className="dict"
-            summary={`규칙 ${(script.pronunciation || []).length}개 · 자막 → 발음 자동 치환 (발음 칸이 비어 있을 때)`}>
+          <Section id="dict" title={tracks.length > 1 ? `발음 사전 · ${tracks.find((t) => t.id === track)?.name}` : '발음 사전'} className="dict"
+            summary={`규칙 ${cfg.pronunciation.length}개 · 자막 → 발음 자동 치환 (발음 칸이 비어 있을 때)`}>
             <div className="rules">
-              {(script.pronunciation || []).map((r, i) => (
+              {cfg.pronunciation.map((r, i) => (
                 <div key={i} className="rule">
                   <input value={r.from} placeholder="자막 표기" onChange={(e) => setRules((rs) => rs.map((x, j) => (j === i ? { ...x, from: e.target.value } : x)))} />
                   <span>→</span>
@@ -1007,6 +1069,17 @@ export default function App({ project }) {
           ) : side === 'thumbs' ? (
             <ThumbsSide T={T} tab={tab} editTime={editTime} ai={ai} aiKey={keys[ai.provider]} onOpenSettings={() => setModal('settings')} />
           ) : (<>
+          <div className="trackbar" title="나레이션 트랙: 트랙마다 대사·타이밍·보이스·발음 사전이 따로 있음. 내보낼 때 음성·자막 트랙을 골라 조합">
+            <span className="muted">트랙</span>
+            {tracks.map((t) => (
+              <button key={t.id} className={`chip ${track === t.id ? 'on' : ''}`} onClick={() => { stop(); setSel(null); setTrackSel(t.id); }}
+                onDoubleClick={() => setTmodal({ mode: 'edit', id: t.id })}>
+                {t.name}<small>{(script[tab] || []).filter((l) => trackOf(l) === t.id).length}</small>
+                {track === t.id && <i className="vset" title="트랙 이름·삭제" onClick={(e) => { e.stopPropagation(); setTmodal({ mode: 'edit', id: t.id }); }}>⚙</i>}
+              </button>
+            ))}
+            <button className="ghost sm" title="트랙 추가 (빈 트랙 / 복제 / AI 번역)" onClick={() => setTmodal({ mode: 'add' })}>＋ 트랙</button>
+          </div>
           <div className="listhead">
             <div className="stats">
               <span className="s-ok">완료 {counts.ok || 0}</span>
@@ -1045,11 +1118,11 @@ export default function App({ project }) {
                     <label><span>자막</span>
                       <textarea rows={2} value={l.text} onChange={(e) => updateLine(l.id, { text: e.target.value })} /></label>
                     <label className={l.tts?.trim() ? 'custom' : ''}><span>발음{l.tts?.trim() ? '' : ' (자동)'}</span>
-                      <textarea rows={2} value={l.tts || ''} placeholder={applyDict(l.text, script.pronunciation)}
+                      <textarea rows={2} value={l.tts || ''} placeholder={applyDict(l.text, cfg.pronunciation)}
                         onChange={(e) => updateLine(l.id, { tts: e.target.value })} />
                       {!l.tts?.trim() && (
                         <button className="ghost fill" title="자동 발음 텍스트를 복사해서 직접 고치기"
-                          onClick={(e) => { e.stopPropagation(); updateLine(l.id, { tts: applyDict(l.text, script.pronunciation) }); }}>편집</button>
+                          onClick={(e) => { e.stopPropagation(); updateLine(l.id, { tts: applyDict(l.text, cfg.pronunciation) }); }}>편집</button>
                       )}
                       {l.tts?.trim() && (
                         <button className="ghost fill" title="발음 입력을 비우고 자동(사전 적용)으로 되돌리기"
@@ -1100,8 +1173,9 @@ export default function App({ project }) {
           log={log} clearLog={() => { setLog([]); setUnreadErr(0); }} focus={setFocus} />
       )}
       {modal === 'export' && (
-        <ExportModal summaries={Object.fromEntries(script.videos.map((k) => [k, summaryOf(k)]))}
+        <ExportModal summaries={Object.fromEntries(script.videos.map((k) => [k, Object.fromEntries(tracks.map((t) => [t.id, summaryOf(k, t.id)]))]))}
           titles={Object.fromEntries(script.videos.map((k) => [k, script.meta[k]?.title || k]))}
+          tracks={tracks} combos={exportCombos(script)} setCombos={(fn) => { setScript((s) => ({ ...s, exports: fn(exportCombos(s)) })); setDirty(true); }}
           dirty={dirty} onSave={() => save()} job={exportJob} onStart={startExport} onCancel={cancelExport}
           onClose={() => setModal(null)} say={say} />
       )}

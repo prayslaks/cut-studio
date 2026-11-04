@@ -7,7 +7,7 @@ const mmss = (t) => { const m = Math.floor(t / 60), s = Math.round(t % 60); retu
 
 // 멀티 트랙 타임라인: 눈금 / 영상 구간 / 카드 / 나레이션(자막·음성) / 썸네일 장면
 // - 빈 곳 클릭·드래그: 재생 위치 이동, 대사·카드 블록 드래그: 시작 시각 이동, Ctrl+휠: 확대
-export default function Timeline({ tl, lines, durOf, statusOf, warnings, editTime, sel, playing, onSeek, onSel, onMove, onDragStart, onDrop,
+export default function Timeline({ tl, lines, trackName, durOf, statusOf, warnings, editTime, sel, playing, onSeek, onSel, onMove, onDragStart, onDrop,
   chapters = [], insts = [], thumbs = [], onCardClick, onCardMove, onCardDragStart, onThumbClick }) {
   const scRef = useRef(null);
   const ref = useRef(null);
@@ -98,7 +98,7 @@ export default function Timeline({ tl, lines, durOf, statusOf, warnings, editTim
         <span className="r-ruler"><button className="ghost" title="축소" onClick={() => zoomBy(0.66)} disabled={zoom <= 1}>−</button><button className="ghost" title="확대 (Ctrl+휠)" onClick={() => zoomBy(1.5)}>+</button></span>
         <span className="r-video">영상</span>
         <span className="r-cards">카드</span>
-        <span className="r-lines">나레이션</span>
+        <span className="r-lines" title={trackName ? `나레이션 트랙: ${trackName}` : undefined}>{trackName || '나레이션'}</span>
         <span className="r-thumbs">썸네일</span>
       </div>
       <div className="mtl-scroll" ref={scRef}>

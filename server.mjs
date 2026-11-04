@@ -14,6 +14,7 @@ import { createFonts } from './fonts.mjs';
 import { createThumbs, TEMPLATES, THUMB_TOOL } from './thumbs.mjs';
 import { createRegistry, createProjectDir, listDir, probe, upgradeScript, DEFAULT_PARENT, srcPath, VIDEO_EXT } from './projects.mjs';
 import os from 'node:os';
+import { MAIN, trackList, trackLines, exportCombos } from './shared/tracks.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // 전역 설정(ffmpeg·기본 폰트)은 studio.config.json, 작업 데이터는 프로젝트 폴더별
@@ -227,7 +228,7 @@ async function thumbsAgent(b, key) {
   if (!cands.length) throw new Error('후보 프레임을 추출하지 못했습니다 (ffmpeg 확인)');
   const offs = []; let t = 0; for (const [a, e] of meta.segs) { offs.push(t); t += e - a; }
   const chapters = (meta.chapters || []).map((c, i) => `${c.num} ${c.kr} (${offs[i]?.toFixed(0)}s~)`).join(', ');
-  const narration = [...(s[b.key] || [])].sort((x, y) => x.start - y.start).map((l) => `${l.start}s ${l.text}`).join('\n');
+  const narration = trackLines(s, b.key, trackList(s)[0].id).sort((x, y) => x.start - y.start).map((l) => `${l.start}s ${l.text}`).join('\n');
   const system = [
     '너는 유튜브 썸네일 아트 디렉터다.',
     `프로젝트: ${pj.name || ''}${pj.brief ? `\n프로젝트 설명·톤(사용자 작성): ${pj.brief}` : ''}`,
@@ -287,7 +288,7 @@ async function youtubeAgent(b, key) {
   const total = t + (meta.end_card ?? 4);
   const yt = meta.youtube || {};
   const other = Object.entries(s.meta || {}).filter(([k]) => k !== b.key).map(([k, m]) => `${m.title}(${m.date || ''})`).join(', ');
-  const narration = [...(s[b.key] || [])].sort((x, y) => x.start - y.start).map((l) => `${l.start}s ${l.text}`).join('\n');
+  const narration = trackLines(s, b.key, trackList(s)[0].id).sort((x, y) => x.start - y.start).map((l) => `${l.start}s ${l.text}`).join('\n');
   const system = [
     '너는 유튜브 채널 운영을 돕는 카피라이터다.',
     `프로젝트: ${pj.name || ''}${pj.brief ? `\n프로젝트 설명·톤(사용자 작성): ${pj.brief}` : ''}`,
@@ -314,6 +315,38 @@ async function youtubeAgent(b, key) {
   const r = await agentCall({ provider: b.provider, model: b.model, system, messages: [{ role: 'user', parts }] }, key, YT_TOOL, true);
   if (!r.edits) throw new Error(r.text || 'AI가 제안을 반환하지 않았습니다');
   return { ...r.edits, text: r.text || '', usage: r.usage };
+}
+
+// ---------- 나레이션 트랙 번역 (트랙 복제 시) ----------
+const TRANSLATE_TOOL = {
+  name: 'translated_lines',
+  description: '나레이션 대사의 번역 결과를 대사 id별로 돌려준다.',
+  schema: {
+    type: 'object',
+    properties: { lines: { type: 'array', items: { type: 'object', properties: {
+      id: { type: 'string', description: '원본 대사 id 그대로' }, text: { type: 'string', description: '번역된 화면 자막' } }, required: ['id', 'text'] } } },
+    required: ['lines'],
+  },
+};
+
+async function translateTrack(b, key) {
+  const s = await loadScript(); const pj = s.project || {};
+  if (!s.meta?.[b.key]) throw Object.assign(new Error('bad key'), { status: 400 });
+  const src = trackLines(s, b.key, b.from || MAIN).sort((x, y) => x.start - y.start);
+  if (!src.length) return { lines: [] };
+  const slot = (i) => (src[i + 1] ? +(src[i + 1].start - src[i].start).toFixed(1) : null);
+  const system = [
+    '너는 영상 나레이션 번역가다. 반드시 translated_lines 도구로 답한다.',
+    `프로젝트: ${pj.name || ''}${pj.brief ? `\n프로젝트 설명·톤: ${pj.brief}` : ''}`,
+    `목표 언어: ${b.lang || 'English'}. 자연스러운 나레이션 문장으로 옮기되 사실을 더하거나 빼지 않는다.`,
+    '- 대사마다 다음 대사까지 남은 시간(slot_s, 초)이 있다. 그 안에 읽힐 길이로 다듬는다(영어는 초당 약 2.5단어).',
+    '- 고유명사·게임 용어는 원래 영문 표기를 유지. 화면 자막이므로 한 줄 약 40자, 최대 2줄 권장.',
+    '- 오디오 태그([calm] 등)는 넣지 않는다. 모든 대사를 빠짐없이 번역한다.',
+  ].join('\n');
+  const list = JSON.stringify(src.map((l, i) => ({ id: l.id, slot_s: slot(i), text: l.text })));
+  const r = await agentCall({ provider: b.provider, model: b.model, system,
+    messages: [{ role: 'user', text: `영상: ${s.meta[b.key].title || b.key}\n대사:\n${list}` }] }, key, TRANSLATE_TOOL, true);
+  return { lines: r.edits?.lines || [], usage: r.usage };
 }
 
 async function listTts() {
@@ -417,6 +450,7 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { used: j.character_count, limit: j.character_limit, tier: j.tier, reset: j.next_character_count_reset_unix });
     }
     if (p === '/api/agent/models') return send(res, 200, await agentModels(url.searchParams.get('provider'), req.headers['x-ai-key']));
+    if (p === '/api/tracks/translate' && req.method === 'POST') return send(res, 200, await translateTrack(JSON.parse(await readBody(req)), req.headers['x-ai-key']));
     if (p === '/api/agent' && req.method === 'POST') {
       const b = JSON.parse(await readBody(req));
       return send(res, 200, await agentCall(b, req.headers['x-ai-key']));
@@ -439,7 +473,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/frame') {
       const key = url.searchParams.get('key'); const t = parseFloat(url.searchParams.get('t') || '0');
       if (!(await hasVideo(key))) return fail(res, 400, 'bad key');
-      const file = await renderFrame(key, t, { font: defaultFont(), width: Number(url.searchParams.get('w')) || 1600 },
+      const file = await renderFrame(key, t, { font: defaultFont(), width: Number(url.searchParams.get('w')) || 1600, subs: url.searchParams.get('track') || MAIN },
         { ff: ffPath(), work: WORK, root: WORK, fontsMap: () => fonts.fontsMap() });
       return send(res, 200, await fsp.readFile(file), 'image/jpeg');
     }
@@ -481,14 +515,20 @@ const server = http.createServer(async (req, res) => {
       const sc = await loadScript();
       const targets = (b.targets || []).filter((k) => (sc.videos || []).includes(k));
       if (!targets.length) return fail(res, 400, '내보낼 영상을 선택하세요');
-      const job = await startExport({ ...b, targets, font: b.font || defaultFont(), prefix: (sc.project?.name || 'video').replace(/[\\/:*?"<>|\s]+/g, '') }, { ff: ffPath(), work: WORK, root: WORK, outDir: outDir(), fontsMap: () => fonts.fontsMap() });
+      // 조합: id 목록이면 프로젝트에 저장된 조합에서 찾음. 트랙 id는 실제로 있는 것만
+      const tids = trackList(sc).map((t) => t.id); const okT = (x) => (x && tids.includes(x) ? x : null);
+      const all = exportCombos(sc);
+      const combos = (b.combos || []).map((c) => (typeof c === 'string' ? all.find((x) => x.id === c) : c)).filter(Boolean)
+        .map((c) => ({ id: String(c.id).replace(/[^A-Za-z0-9_-]/g, '') || 'c', name: c.name || '', audio: okT(c.audio), subs: okT(c.subs), suffix: c.suffix || '', audioOnly: !!c.audioOnly }));
+      if (!combos.length) return fail(res, 400, '내보낼 조합을 선택하세요');
+      const job = await startExport({ ...b, targets, combos, font: b.font || defaultFont(), prefix: (sc.project?.name || 'video').replace(/[\\/:*?"<>|\s]+/g, '') }, { ff: ffPath(), work: WORK, root: WORK, outDir: outDir(), fontsMap: () => fonts.fontsMap() });
       return send(res, 200, { id: job.id });
     }
     m = /^\/api\/export\/([a-z0-9]+)(?:\/(cancel|file\/([A-Za-z0-9_-]+)))?$/.exec(p);
     if (m) {
       const job = getJob(m[1]); if (!job) return fail(res, 404, '작업 없음');
       if (m[2] === 'cancel') { cancelJob(m[1]); return send(res, 200, { ok: true }); }
-      if (m[3]) { const it = job.items.find((x) => x.key === m[3]); return it?.status === 'done' ? streamFile(req, res, it.out, 'video/mp4') : fail(res, 404, '완료된 파일 없음'); }
+      if (m[3]) { const it = job.items.find((x) => x.id === m[3]); return it?.status === 'done' ? streamFile(req, res, it.out, it.audioOnly ? 'audio/mp4' : 'video/mp4') : fail(res, 404, '완료된 파일 없음'); }
       const { proc, ...rest } = job;
       return send(res, 200, rest);
     }

@@ -8,6 +8,7 @@ import path from 'node:path';
 import { FRAME, SUB, resolveStyle, SUB_TAIL, wrapLines, highlightParts } from './shared/layout.js';
 import { resolveCards, cardInstances, cardAss } from './shared/cards.js';
 import { srcPath } from './projects.mjs';
+import { MAIN, trackLines, trackCfg, applyDict } from './shared/tracks.js';
 
 const { W, H } = FRAME;
 const assColor = (hex = '#FFFFFF') => { const h = hex.replace('#', '').padEnd(6, '0'); return `&H${h.slice(4, 6)}${h.slice(2, 4)}${h.slice(0, 2)}&`.toUpperCase(); };
@@ -110,12 +111,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
   return o;
 }
 
-function applyDict(text, rules = []) {
-  let out = text || '';
-  [...rules].filter((r) => r.from).sort((a, b) => b.from.length - a.from.length).forEach((r) => { out = out.split(r.from).join(r.to ?? ''); });
-  return out;
-}
-
 // ---------- 내보내기 작업 ----------
 const jobs = new Map();
 let current = null;
@@ -132,7 +127,10 @@ export function cancelJob(id) {
 export async function startExport(opts, env) {
   if (current && !current.finished) throw Object.assign(new Error('이미 내보내기가 진행 중입니다'), { status: 409 });
   const id = Date.now().toString(36);
-  const job = { id, created: Date.now(), items: opts.targets.map((k) => ({ key: k, status: 'queued', progress: 0 })), finished: false };
+  // 항목 = 영상 × 조합 (조합 없으면 기본 트랙 하나)
+  const combos = opts.combos?.length ? opts.combos : [{ id: MAIN, name: '', audio: MAIN, subs: MAIN, suffix: '' }];
+  const job = { id, created: Date.now(), finished: false,
+    items: opts.targets.flatMap((k) => combos.map((c) => ({ id: `${k}__${c.id}`, key: k, combo: c, status: 'queued', progress: 0 }))) };
   jobs.set(id, job); current = job;
   (async () => {
     for (const it of job.items) {
@@ -147,6 +145,7 @@ export async function startExport(opts, env) {
 }
 
 // 편집본 타임라인·대사 길이 계산 + ASS 파일 작성 (내보내기와 프레임 렌더가 공유)
+// opts.audio / opts.subs: 음성·자막으로 쓸 나레이션 트랙 id (null = 넣지 않음)
 async function prepare(key, opts, env) {
   const { ff, work } = env;
   const script = JSON.parse(await fsp.readFile(path.join(work, 'script.json'), 'utf8'));
@@ -155,25 +154,33 @@ async function prepare(key, opts, env) {
   const segs = meta.segs; const endDur = meta.end_card ?? 4;
   const offs = []; let t = 0; for (const [s, e] of segs) { offs.push(t); t += e - s; }
   const body = t, total = body + endDur;
-  const lines = [];
-  for (const l of [...script[key]].sort((a, b) => a.start - b.start)) {
-    const mp3 = path.join(work, 'tts', `${l.id}.mp3`);
-    const exists = fs.existsSync(mp3);
-    const say = l.tts?.trim() ? l.tts : applyDict(l.text, script.pronunciation);
-    const dur = (exists && await probeDur(ff, mp3)) || Math.max(2, say.length / 7);
-    lines.push({ ...l, mp3: opts.tts !== false && exists ? mp3 : null, dur });
-  }
+  const linesOf = async (tid) => {
+    if (!tid) return [];
+    const dict = trackCfg(script, tid).pronunciation;
+    const out = [];
+    for (const l of trackLines(script, key, tid).sort((a, b) => a.start - b.start)) {
+      const mp3 = path.join(work, 'tts', `${l.id}.mp3`);
+      const exists = fs.existsSync(mp3);
+      const say = l.tts?.trim() ? l.tts : applyDict(l.text, dict);
+      const dur = (exists && await probeDur(ff, mp3)) || Math.max(2, say.length / 7);
+      out.push({ ...l, mp3: exists ? mp3 : null, dur });
+    }
+    return out;
+  };
+  const audioTrack = opts.audio === undefined ? MAIN : opts.audio, subTrack = opts.subs === undefined ? MAIN : opts.subs;
+  const lines = await linesOf(subTrack); // 자막
+  const voice = opts.tts === false ? [] : (audioTrack === subTrack ? lines : await linesOf(audioTrack)).filter((l) => l.mp3); // 음성
   const assName = opts.assName || `subs_${key}.ass`;
   const fontsMap = env.fontsMap ? await env.fontsMap() : {};
   const st = resolveStyle(script.style || {}, fontsMap, opts.font);
   await fsp.writeFile(path.join(work, assName), buildAss({ st, meta, cards: resolveCards(meta), fontsMap, offs, body, total, lines, project: script.project }), 'utf8');
-  return { script, meta, segs, endDur, offs, body, total, lines, assName, st };
+  return { script, meta, segs, endDur, offs, body, total, lines, voice, assName, st };
 }
 
 // 최종 렌더와 동일한 자막·카드로 한 프레임만 렌더 (편집본 시각 t)
 export async function renderFrame(key, t, opts, env) {
   const { ff, work, root } = env;
-  const P = await prepare(key, { ...opts, assName: `subs_${key}_frame.ass` }, env);
+  const P = await prepare(key, { ...opts, audio: null, assName: `subs_${key}_frame.ass` }, env);
   t = Math.max(0, Math.min(t, P.total - 0.05));
   let inp;
   if (t >= P.body) inp = ['-f', 'lavfi', '-i', `color=c=0x080C0F:s=${W}x${H}:d=1`];
@@ -191,21 +198,24 @@ export async function renderFrame(key, t, opts, env) {
 
 async function exportOne(it, opts, env, job) {
   const { ff, work, root, outDir } = env;
-  const key = it.key;
+  const key = it.key; const combo = it.combo || {};
+  const audioOnly = !!combo.audioOnly;
   it.status = 'preparing';
-  const { meta, segs, endDur, body, total, lines, assName, st } = await prepare(key, opts, env);
+  const { meta, segs, endDur, body, total, lines, voice, assName, st } = await prepare(key, { ...opts, audio: combo.audio ?? MAIN, subs: audioOnly ? null : combo.subs ?? MAIN, assName: `subs_${key}_${combo.id || MAIN}.ass` }, env);
 
-  const base = (meta.out || `${path.parse(meta.src).name}_편집본`) + (opts.suffix || '');
-  const out = path.join(outDir || root, `${base}.mp4`);
-  const part = path.join(outDir || root, `${base}.part.mp4`);
-  if (opts.srt) {
+  const base = (meta.out || `${path.parse(meta.src).name}_편집본`) + (opts.suffix || '') + String(combo.suffix || '').replace(/[\/:*?"<>|]+/g, '_');
+  const ext = audioOnly ? 'm4a' : 'mp4';
+  const out = path.join(outDir || root, `${base}.${ext}`);
+  const part = path.join(outDir || root, `${base}.part.${ext}`);
+  await fsp.mkdir(outDir || root, { recursive: true });
+  if (opts.srt && !audioOnly && combo.subs !== null) {
     const srt = lines.filter((l) => l.text.trim()).map((l, i) =>
       `${i + 1}\n${srtTs(l.start)} --> ${srtTs(l.start + l.dur + SUB_TAIL)}\n${wrapLines(l.text, st.sub.maxChars).join('\n')}\n`).join('\n');
     await fsp.writeFile(path.join(outDir || root, `${base}.srt`), '﻿' + srt, 'utf8');
     it.srt = path.join(outDir || root, `${base}.srt`);
   }
 
-  // 필터 그래프
+  // 필터 그래프 (오디오만 내보내기: 영상 없이 같은 길이의 최종 믹스 — 유튜브 다국어 오디오 트랙용)
   const src = srcPath(meta, root);
   const inputs = ['-i', src]; const fc = []; const n = segs.length;
   // 마지막 구간: 엔딩 카드로 넘어가기 전에 게임 소리를 길게 페이드아웃 (소스가 끝나며 뚝 끊기지 않도록)
@@ -213,22 +223,25 @@ async function exportOne(it, opts, env, job) {
   segs.forEach(([s, e], i) => {
     const d = e - s;
     const af = i === n - 1 ? Math.min(endFade, d) : FADE;
-    fc.push(`[0:v]trim=${s}:${e},setpts=PTS-STARTPTS,fps=30000/1001,scale=${W}:${H},setsar=1,fade=in:st=0:d=${FADE},fade=out:st=${(d - FADE).toFixed(3)}:d=${FADE}[v${i}]`);
+    if (!audioOnly) fc.push(`[0:v]trim=${s}:${e},setpts=PTS-STARTPTS,fps=30000/1001,scale=${W}:${H},setsar=1,fade=in:st=0:d=${FADE},fade=out:st=${(d - FADE).toFixed(3)}:d=${FADE}[v${i}]`);
     fc.push(`[0:a]atrim=${s}:${e},asetpts=PTS-STARTPTS,aformat=sample_rates=48000:channel_layouts=stereo,afade=in:st=0:d=${FADE},afade=out:st=${(d - af).toFixed(3)}:d=${af.toFixed(3)}[a${i}]`);
   });
-  fc.push(`color=c=0x080C0F:s=${W}x${H}:r=30000/1001:d=${endDur},format=yuv420p,setsar=1[v${n}]`);
+  if (!audioOnly) fc.push(`color=c=0x080C0F:s=${W}x${H}:r=30000/1001:d=${endDur},format=yuv420p,setsar=1[v${n}]`);
   fc.push(`anullsrc=r=48000:cl=stereo,atrim=0:${endDur}[a${n}]`);
-  fc.push(Array.from({ length: n + 1 }, (_, i) => `[v${i}][a${i}]`).join('') + `concat=n=${n + 1}:v=1:a=1[vc][ac]`);
-  const scale = opts.height && opts.height !== H ? `,scale=-2:${opts.height}:flags=lanczos` : '';
-  fc.push(`[vc]subtitles=filename=${assName}:fontsdir=fonts${scale},format=yuv420p[vout]`);
-  const tts = lines.filter((l) => l.mp3);
+  if (audioOnly) fc.push(Array.from({ length: n + 1 }, (_, i) => `[a${i}]`).join('') + `concat=n=${n + 1}:v=0:a=1[ac]`);
+  else {
+    fc.push(Array.from({ length: n + 1 }, (_, i) => `[v${i}][a${i}]`).join('') + `concat=n=${n + 1}:v=1:a=1[vc][ac]`);
+    const scale = opts.height && opts.height !== H ? `,scale=-2:${opts.height}:flags=lanczos` : '';
+    fc.push(`[vc]subtitles=filename=${assName}:fontsdir=fonts${scale},format=yuv420p[vout]`);
+  }
   const gv = (opts.gameVolume ?? 0.55).toFixed(2);
-  if (tts.length) {
-    tts.forEach((l, k) => {
+  if (voice.length) {
+    voice.forEach((l, k) => {
       inputs.push('-i', l.mp3); const ms = Math.round(l.start * 1000);
       fc.push(`[${k + 1}:a]aformat=sample_rates=48000:channel_layouts=stereo,adelay=${ms}|${ms},volume=${(opts.ttsVolume ?? 1.6).toFixed(2)}[t${k}]`);
     });
-    fc.push(tts.map((_, k) => `[t${k}]`).join('') + `amix=inputs=${tts.length}:normalize=0:duration=longest,asplit=2[tts1][tts2]`);
+    // apad: 마지막 대사가 영상보다 먼저 끝나도 사이드체인 입력이 끊기지 않게 (끊기면 sidechaincompress가 멈춰 인코딩이 멈춤, 길이는 -t로 자름)
+    fc.push(voice.map((_, k) => `[t${k}]`).join('') + `amix=inputs=${voice.length}:normalize=0:duration=longest,apad,asplit=2[tts1][tts2]`);
     fc.push(`[ac]volume=${gv}[g]`);
     fc.push('[g][tts1]sidechaincompress=threshold=0.015:ratio=10:attack=30:release=500[gd]');
     fc.push('[gd][tts2]amix=inputs=2:normalize=0:duration=first,alimiter=limit=0.95[aout]');
@@ -237,11 +250,11 @@ async function exportOne(it, opts, env, job) {
   }
   const enc = ENCODERS[opts.encoder] || ENCODERS.libx264;
   const args = ['-y', '-hide_banner', '-loglevel', 'error', '-progress', 'pipe:1', '-nostats', ...inputs,
-    '-filter_complex', fc.join(';'), '-map', '[vout]', '-map', '[aout]',
-    ...enc.args(opts.quality || 'standard'), '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k',
-    '-movflags', '+faststart', '-t', total.toFixed(3), part];
+    '-filter_complex', fc.join(';'),
+    ...(audioOnly ? ['-map', '[aout]', '-vn'] : ['-map', '[vout]', '-map', '[aout]', ...enc.args(opts.quality || 'standard'), '-pix_fmt', 'yuv420p']),
+    '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', '-t', total.toFixed(3), part];
 
-  it.status = 'encoding'; it.total = total; it.started = Date.now(); it.out = out;
+  it.status = 'encoding'; it.total = total; it.started = Date.now(); it.out = out; it.audioOnly = audioOnly;
   let errTail = '';
   const code = await new Promise((ok) => {
     const p = spawn(ff, args, { cwd: work, windowsHide: true });
