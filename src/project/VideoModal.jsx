@@ -130,6 +130,8 @@ export default function VideoModal({ vkey, meta, isNew, initialSrc, initialTitle
   const footer = picking && !rows.length ? <><span className="grow" /><button onClick={onClose}>취소</button></> : (
     <>
       {!isNew && <button className="ghost danger" onClick={() => { if (window.confirm(`'${meta?.title}' 영상을 프로젝트에서 뺄까요? 대사도 함께 지워집니다 (원본 파일·음성 파일은 남음).`)) onDelete(); }}>프로젝트에서 빼기</button>}
+      {!isNew && meta?.undo && <button className="ghost" title={`AI 구성 초안을 적용하기 전(${new Date(meta.undo.at).toLocaleString()})의 구간·챕터·제목으로 되돌립니다`}
+        onClick={() => { if (window.confirm('AI 구성 초안을 적용하기 전 구성으로 되돌릴까요?')) onSave({ ...m, title: meta.undo.title, src: meta.undo.src, segs: meta.undo.segs, chapters: meta.undo.chapters || [], undo: null }); }}>↶ 초안 적용 전으로</button>}
       <span className="grow muted sm">{!isNew && '구간을 바꾸면 대사·카드 시각(편집본 기준)은 그대로라 화면과 어긋날 수 있습니다.'}</span>
       <button onClick={onClose}>취소</button>
       <button className="primary" disabled={!ok} onClick={save}>{isNew ? '영상 추가' : '저장'}</button>

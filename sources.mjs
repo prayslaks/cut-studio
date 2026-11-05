@@ -15,6 +15,7 @@ import {
   SCENE_SENS, STT_MODELS, STT_LANGS, ctxOn, sceneSpans, transcriptBlock,
 } from './shared/sources.js';
 import { detectScenes, transcribe as runStt, cleanCuts } from './analysis.mjs';
+import { fitFilter } from './shared/clips.js';
 
 const invalid = (message, status = 400) => Object.assign(new Error(message), { status });
 const ID = /^[a-z0-9-]{1,64}$/;
@@ -439,6 +440,19 @@ export function createSources({ work, ff, probe, inUse = async () => false, elBa
         return { file: item.path, type: ext === '.webm' ? 'video/webm' : ext === '.mov' ? 'video/quicktime' : 'video/mp4' };
       }
       throw invalid('파일이 없는 소스입니다.', 404);
+    },
+    // 영상 소스의 임의 시각 장면 (구성 초안 검토용 썸네일, 디스크 캐시)
+    async still(id, t, w = 192) {
+      const item = find(await lock(read), id);
+      if (item.kind !== 'video') throw invalid('영상 소스가 아닙니다.', 404);
+      t = Math.max(0, Math.min(item.duration - 0.05, +t || 0));
+      w = Math.max(80, Math.min(640, Math.round(+w || 192)));
+      const out = path.join(dirOf(id), `still_${Math.round(t * 1000)}_${w}.jpg`);
+      try { await fsp.access(out); return out; } catch {}
+      await fsp.mkdir(dirOf(id), { recursive: true });
+      const r = await run(ff(), ['-y', '-hide_banner', '-loglevel', 'error', '-ss', t.toFixed(3), '-i', item.path, '-frames:v', '1',
+        '-vf', fitFilter(w, Math.round((w * 9) / 16 / 2) * 2), '-q:v', '5', out]);
+      try { await fsp.access(out); return out; } catch { throw invalid(r.err.trim().split('\n').pop() || '장면을 추출하지 못했습니다.', 500); }
     },
     frameFile(id, ms) {
       if (!ID.test(id || '') || !/^\d{1,9}$/.test(ms)) throw invalid('bad frame');

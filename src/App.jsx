@@ -23,6 +23,7 @@ import ProjectSettings from './project/ProjectSettings.jsx';
 import SourcesPanel from './sources/SourcesPanel.jsx';
 import { useSources } from './sources/useSources.js';
 import CardInspector from './cards/CardInspector.jsx';
+import ComposeModal from './drafts/ComposeModal.jsx';
 import CardEditOverlay from './cards/CardEditOverlay.jsx';
 import { cardInstances, cardFocusTime, newCardText, newCardRect, newCardGrad } from '../shared/cards.js';
 import { MAIN, trackOf, trackList, trackCfg, patchTrackCfg, nextLineId, exportCombos, applyDict } from '../shared/tracks.js';
@@ -77,6 +78,7 @@ export default function App({ project, onProjectChange }) {
   const [dirty, setDirty] = useState(false);
   const [tab, setTab] = useState(() => ls.get('zk.tab', ''));
   const [vmodal, setVmodal] = useState(null); // { key, isNew }
+  const [compose, setCompose] = useState(null); // AI 구성 초안 창: { key: 다시 구성할 영상 | '' = 새 영상 }
   const [phome, setPhome] = useState(null);
   const [projectPrompt, setProjectPrompt] = useState(null);
   const [closingProject, setClosingProject] = useState(false);
@@ -933,6 +935,15 @@ export default function App({ project, onProjectChange }) {
     setScript(next); setVmodal(null); setTab(next.videos[0] || '');
     try { await save(next); say('영상을 프로젝트에서 뺐습니다', 'ok'); } catch (e) { say(e.message, 'err'); }
   };
+  // AI 구성 초안 적용: 새 편집 영상을 만들거나, 기존 영상의 구성을 바꾸고 이전 구성을 undo로 남김 (영상 설정 창에서 되돌리기)
+  const applyComposition = async (m, key) => {
+    setCompose(null);
+    if (key) {
+      const cur = script.meta[key];
+      await saveVideo({ ...m, undo: { at: new Date().toISOString(), title: cur.title, src: cur.src, segs: cur.segs, chapters: cur.chapters || [] } }, key);
+      say(`구성 초안을 ‘${m.title}’에 적용했습니다 (영상 설정 창에서 되돌리기 가능). 대사 시각은 그대로라 확인이 필요합니다.`, 'ok');
+    } else await saveVideo({ date: '', end: ['', ''], end_card: 4, ...m }, null);
+  };
   const setProject = (patch) => { setScript((x) => ({ ...x, project: { ...(x.project || {}), ...patch } })); setDirty(true); };
   const finishProjectPrompt = (choice) => {
     projectPrompt.resolve(choice);
@@ -983,6 +994,9 @@ export default function App({ project, onProjectChange }) {
     {tmodal && <TrackModal mode={tmodal.mode} track={tracks.find((t) => t.id === tmodal.id)} tracks={tracks} current={track}
       onSave={(t) => { saveTrack(t); setTmodal(null); }} onDelete={deleteTrack} onTranslate={translateTrack}
       aiReady={!!keys[ai.provider]} onClose={() => setTmodal(null)} say={say} />}
+    {compose && <ComposeModal projectId={project.id} ai={ai} aiKey={keys[ai.provider]} onOpenSettings={() => setModal('settings')}
+      sources={S.items || []} usage={S.usage} videos={(script.videos || []).map((k) => ({ key: k, title: script.meta[k]?.title || k }))}
+      initialKey={compose.key || ''} onApply={applyComposition} onClose={() => setCompose(null)} say={say} />}
     {modal === 'project' && <ProjectSettings project={script.project || {}} onChange={setProject} dirty={dirty} onSave={() => save()} onClose={() => setModal(null)} say={say} />}
   </>);
   // 소스 패널 (작업 화면 왼쪽 끝, 영상이 없을 때도 표시)
@@ -993,7 +1007,8 @@ export default function App({ project, onProjectChange }) {
       dragging={dragging} pickRequest={srcPick} usedPaths={usedPaths} brief={script.project?.brief || ''}
       onEditProject={() => setModal('project')} say={say}
       onUseAsVideo={(s) => setVmodal({ isNew: true, src: s.path, title: s.title })}
-      appendTitle={script.videos?.includes(tab) && meta ? meta.title || tab : ''} onAppend={(s) => setVmodal({ key: tab, append: s.path })} />
+      appendTitle={script.videos?.includes(tab) && meta ? meta.title || tab : ''} onAppend={(s) => setVmodal({ key: tab, append: s.path })}
+      onCompose={() => setCompose({ key: '' })} />
     {lay.srcOpen && <Splitter axis="x" getStart={() => lay.src} onDrag={(d, v) => setL('src', clamp(v + d, 240, 720))} onReset={() => setL('src', DEFAULT_LAYOUT.src)} />}
   </>);
   const dropOverlay = dragging && !lay.srcOpen && <div className="drop-overlay" aria-hidden="true"><b>놓으면 소스로 추가합니다</b><small>영상 · 이미지 · 텍스트</small></div>;
@@ -1044,6 +1059,7 @@ export default function App({ project, onProjectChange }) {
             <div className="empty-actions">
               <button className="primary" onClick={() => setVmodal({ isNew: true })}>＋ 영상 가져오기</button>
               <button onClick={() => { openSources('list'); setSrcPick((n) => n + 1); }}>소스 파일 추가</button>
+              <button className="accent" onClick={() => setCompose({ key: '' })} title="체크한 소스 영상으로 AI가 구간·순서·챕터를 제안">✦ 소스로 구성 초안</button>
             </div>
           </div>
         </div>
@@ -1085,6 +1101,7 @@ export default function App({ project, onProjectChange }) {
                 </button>
               ))}
               <button className="addvid" onClick={() => setVmodal({ isNew: true })}>＋ 영상 추가</button>
+              <button className="addvid" onClick={() => setCompose({ key: tab })} title="체크한 소스 영상으로 AI가 구간·순서·챕터를 제안 (새 영상 또는 이 영상 다시 구성)">✦ 구성 초안</button>
             </nav>
             {side !== 'thumbs' && <button className="sm render-check" title="내보내기와 동일한 방식으로 현재 프레임 렌더" onClick={renderShot}>실제 렌더 확인</button>}
           </div>

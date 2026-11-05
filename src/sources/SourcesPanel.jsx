@@ -93,7 +93,7 @@ function AnalysisBadges({ s }) {
 }
 
 // 영상 소스를 한 번에 분석: 장면 전환(무료) / 받아쓰기(ElevenLabs 사용량 발생)
-function BulkAnalysis({ items, S, elKey, onNeedKey, say }) {
+function BulkAnalysis({ items, S, elKey, onNeedKey, onCompose, say }) {
   const [busy, setBusy] = useState(false);
   const vids = items.filter((s) => s.kind === 'video');
   if (!vids.length) return null;
@@ -118,12 +118,13 @@ function BulkAnalysis({ items, S, elKey, onNeedKey, say }) {
           const lang = (() => { try { return localStorage.getItem('zk.stt.lang') || ''; } catch { return ''; } })();
           each(needStt, (s) => S.transcribe(s.id, { lang }, elKey));
         }}>받아쓰기 {needStt.length}개 · {minutes}분</button>
+      {onCompose && <button className="sm accent" title="체크한 영상 소스로 AI가 구간·순서·챕터를 제안 (검토 후 적용)" onClick={onCompose}>✦ 구성 초안</button>}
     </div>
   );
 }
 
 // NotebookLM식 소스 패널: 여러 자료를 한 번에 올리고, 내용과 AI에 실제로 가는 컨텍스트를 확인·제어
-export default function SourcesPanel({ S, open, onToggle, view, setView, dragging, pickRequest, usedPaths, brief, onEditProject, onUseAsVideo, appendTitle, onAppend, elKey, onNeedKey, say }) {
+export default function SourcesPanel({ S, open, onToggle, view, setView, dragging, pickRequest, usedPaths, brief, onEditProject, onUseAsVideo, appendTitle, onAppend, elKey, onNeedKey, onCompose, say }) {
   const inputRef = useRef(null);
   const [draft, setDraft] = useState(false);
   const [linking, setLinking] = useState(false);
@@ -188,7 +189,7 @@ export default function SourcesPanel({ S, open, onToggle, view, setView, draggin
           {!S.items && !S.error && <p className="muted sm">소스를 불러오는 중…</p>}
           {S.items && (items.length ? (<>
             <UsageMeter usage={S.usage} />
-            <BulkAnalysis items={items} S={S} elKey={elKey} onNeedKey={onNeedKey} say={say} />
+            <BulkAnalysis items={items} S={S} elKey={elKey} onNeedKey={onNeedKey} onCompose={onCompose} say={say} />
             <div className="src-listhead">
               <label className="chk">
                 <input type="checkbox" checked={all} ref={(el) => { if (el) el.indeterminate = some && !all; }} disabled={busy}

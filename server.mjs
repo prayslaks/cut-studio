@@ -12,7 +12,8 @@ import { exec, spawn } from 'node:child_process';
 import { checkFfmpeg, startExport, getJob, cancelJob, renderFrame, ENCODERS } from './export.mjs';
 import { createFonts } from './fonts.mjs';
 import { createThumbs, TEMPLATES, THUMB_TOOL } from './thumbs.mjs';
-import { createRegistry, createProjectDir, listDir, probe, upgradeScript, DEFAULT_PARENT, srcPath, clipPaths, VIDEO_EXT } from './projects.mjs';
+import { createRegistry, createProjectDir, listDir, probe, upgradeScript, DEFAULT_PARENT, srcPath, segPath, clipPaths, VIDEO_EXT } from './projects.mjs';
+import { baseName } from './shared/clips.js';
 import os from 'node:os';
 import { MAIN, trackList, trackLines, exportCombos } from './shared/tracks.js';
 import { APP_NAME } from './shared/app.js';
@@ -336,6 +337,86 @@ async function youtubeAgent(b, key) {
   return { ...r.edits, text: r.text || '', usage: r.usage };
 }
 
+// ---------- 구성 초안: 소스 영상에서 쓸 구간·순서·챕터 제안 ----------
+const COMPOSE_TOOL = {
+  name: 'propose_composition',
+  description: '프로젝트 소스의 영상에서 쓸 구간을 골라 순서대로 이어 붙인 편집 영상 구성안을 제안한다. 사용자가 구간별로 검토·수정한 뒤 적용한다.',
+  schema: {
+    type: 'object',
+    properties: {
+      title: { type: 'string', description: '편집 영상 제목 (짧게)' },
+      summary: { type: 'string', description: '구성 의도 한두 문장' },
+      segments: {
+        type: 'array',
+        description: '이어 붙일 순서대로',
+        items: {
+          type: 'object',
+          properties: {
+            source: { type: 'integer', description: '구간을 잘라 올 [소스 번호] (영상 소스만)' },
+            start: { type: 'number', description: '그 영상 원본 기준 시작 초' },
+            end: { type: 'number', description: '그 영상 원본 기준 끝 초' },
+            chapter: { type: 'string', description: '이 구간에서 새 챕터가 시작되면 짧은 챕터 제목, 아니면 생략' },
+            reason: { type: 'string', description: '이 구간을 고른 근거 — [소스 n]의 장면·받아쓰기·메모를 시각과 함께' },
+          },
+          required: ['source', 'start', 'end', 'reason'],
+        },
+      },
+      notes: { type: 'string', description: '사용자가 확인해야 할 점 (근거가 약한 부분, 빠진 소재 등)' },
+    },
+    required: ['segments'],
+  },
+};
+
+async function composeAgent(b, key) {
+  const store = sources;
+  const s = await loadScript(); const pj = s.project || {};
+  const items = (await store.list()).filter((x) => x.enabled);
+  const vids = items.filter((x) => x.kind === 'video');
+  if (!vids.length) throw Object.assign(new Error('AI 컨텍스트에 켜진 영상 소스가 없습니다. 소스 패널에서 쓸 촬영본을 체크하세요.'), { status: 400 });
+  const num = new Map(items.map((x, i) => [x.id, i + 1])); // AI 컨텍스트의 [소스 번호]와 같은 순서
+  const target = Math.max(0, Math.min(3600, Math.round(+b.target || 0)));
+  const cur = b.key && s.meta?.[b.key];
+  const curDesc = cur ? (cur.segs || []).map((g, i) => {
+    const f = segPath(cur, g, WORK); const v = vids.find((x) => x.path === f);
+    const ch = cur.chapters?.[i]?.kr ? ` 챕터 "${cur.chapters[i].kr}"` : '';
+    return `${i + 1}) ${v ? `[소스 ${num.get(v.id)}]` : baseName(f)} ${g[0]}–${g[1]}초${ch}`;
+  }).join(' / ') : '';
+  const system = [
+    '너는 유튜브 영상 편집자다. 프로젝트 소스의 촬영본에서 쓸 구간을 골라 편집 순서를 짠다. 반드시 propose_composition 도구로 답한다.',
+    `프로젝트: ${pj.name || ''}${pj.brief ? `\n프로젝트 설명·톤(사용자 작성): ${pj.brief}` : ''}`,
+    '규칙',
+    '- source는 아래 소스 목록의 영상 소스 번호만. start/end는 그 영상 원본 기준 초(0.1 단위), 영상 길이를 넘지 않는다. 구간은 1.5초 이상.',
+    '- 장면 전환 목록이 있으면 경계를 장면 경계 근처에 맞춘다. 받아쓰기가 있으면 문장 중간에서 자르지 않는다(문장 시작·끝 기준).',
+    '- 같은 영상의 같은 부분을 반복하지 않는다. 메뉴·로딩·검은 화면·의미 없는 대기 장면은 뺀다.',
+    '- 시청자가 끝까지 보도록 도입(훅) → 본론 → 마무리 흐름. 챕터는 의미가 바뀌는 곳에서만(짧은 영상이면 없어도 됨), 제목은 짧게.',
+    '- reason에는 [소스 n]과 시각을 들어 근거를 쓴다. 장면·받아쓰기·메모로 확인되지 않는 내용은 추측이라고 밝힌다.',
+    '- 사용자 요청이 있으면 그것을 우선한다. 소스가 부족해 요청을 다 채울 수 없으면 notes에 쓴다.',
+  ].join('\n');
+  const text = [
+    `요청: ${String(b.brief || '').trim() || '(따로 없음) — 소스 내용을 살려 끝까지 볼 만한 구성'}`,
+    target ? `목표 길이: 약 ${target}초 (±15%)` : '목표 길이: 정하지 않음 (소스 분량과 내용에 맞게)',
+    `잘라 쓸 수 있는 영상 소스: ${vids.map((v) => `[소스 ${num.get(v.id)}] ${v.title} (길이 ${v.duration}초, 장면 분석 ${v.scenes?.status === 'done' ? '있음' : '없음'}, 받아쓰기 ${v.transcript?.status === 'done' ? '있음' : '없음'})`).join(', ')}`,
+    cur ? `지금 편집 영상 "${cur.title}"의 구성 (다시 짜는 중이면 참고, 그대로 둘 필요는 없음): ${curDesc || '(없음)'}` : '',
+  ].filter(Boolean).join('\n');
+  const r = await agentCall({ provider: b.provider, model: b.model, system, messages: [{ role: 'user', text }] }, key, COMPOSE_TOOL, true, { sources: store });
+  if (!r.edits) throw new Error(r.text || 'AI가 구성안을 반환하지 않았습니다');
+  // 검증: 소스 번호 → 실제 영상, 시각은 영상 길이 안으로
+  const byNum = new Map(items.map((x, i) => [i + 1, x]));
+  const r1 = (v) => Math.round(v * 10) / 10;
+  const rows = []; const skipped = [];
+  for (const g of Array.isArray(r.edits.segments) ? r.edits.segments : []) {
+    const v = byNum.get(Math.round(+g.source));
+    if (!v || v.kind !== 'video') { skipped.push(`[소스 ${g.source}]는 영상 소스가 아님`); continue; }
+    const st = r1(Math.max(0, +g.start || 0)); const en = r1(Math.min(v.duration, +g.end || 0));
+    if (!(en - st >= 0.5)) { skipped.push(`[소스 ${g.source}] ${g.start}–${g.end}초는 올바른 구간이 아님`); continue; }
+    rows.push({ sourceId: v.id, n: num.get(v.id), title: v.title, file: v.path, duration: v.duration, s: st, e: en,
+      chapter: String(g.chapter || '').trim().slice(0, 40), reason: String(g.reason || '').trim().slice(0, 400) });
+  }
+  if (!rows.length) throw new Error(`쓸 수 있는 구간이 없습니다${skipped.length ? `: ${skipped.join(', ')}` : ''}`);
+  return { title: String(r.edits.title || '').trim().slice(0, 80), summary: String(r.edits.summary || '').trim(), notes: String(r.edits.notes || '').trim(),
+    rows, skipped, text: r.text || '', usage: r.usage };
+}
+
 // ---------- 나레이션 트랙 번역 (트랙 복제 시) ----------
 const TRANSLATE_TOOL = {
   name: 'translated_lines',
@@ -415,9 +496,10 @@ const server = http.createServer(async (req, res) => {
     if (p.startsWith('/api/sources')) {
       const src = sources;
       // 미리보기용 파일은 <img>/<video>가 직접 요청 (헤더 없음, 읽기 전용)
-      const fm = /^\/api\/sources\/([a-z0-9-]+)\/(file|frames\/(\d+)\.jpg)$/.exec(p);
+      const fm = /^\/api\/sources\/([a-z0-9-]+)\/(file|still|frames\/(\d+)\.jpg)$/.exec(p);
       if (fm && req.method === 'GET') {
         if (fm[3]) return streamFile(req, res, src.frameFile(fm[1], fm[3]), 'image/jpeg');
+        if (fm[2] === 'still') return streamFile(req, res, await src.still(fm[1], url.searchParams.get('t'), url.searchParams.get('w')), 'image/jpeg');
         const f = await src.file(fm[1]);
         return streamFile(req, res, f.file, f.type);
       }
@@ -556,6 +638,10 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/thumbs/still') {
       const q = Object.fromEntries(url.searchParams); if (!(await hasVideo(q.key))) return fail(res, 400, 'bad key');
       return send(res, 200, await thumbs.still(q.key, +q.t || 0, Math.max(80, Math.min(640, +q.w || 240))), 'image/jpeg');
+    }
+    if (p === '/api/compose' && req.method === 'POST') {
+      if (req.headers['x-project-id'] !== P.id) return fail(res, 409, '열린 프로젝트가 바뀌었습니다. 프로젝트를 다시 여세요.');
+      return send(res, 200, await composeAgent(JSON.parse(await readBody(req)), req.headers['x-ai-key']));
     }
     if (p === '/api/youtube/agent' && req.method === 'POST') return send(res, 200, await youtubeAgent(JSON.parse(await readBody(req)), req.headers['x-ai-key']));
     if (p === '/api/thumbs/agent' && req.method === 'POST') return send(res, 200, await thumbsAgent(JSON.parse(await readBody(req)), req.headers['x-ai-key']));
