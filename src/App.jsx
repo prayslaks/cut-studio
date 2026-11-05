@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { buildTimeline, editToSrc, srcToEdit, fmt, estDur, SUB_TAIL } from './timeline.js';
-import Agent from './Agent.jsx';
+import Agent, { NARRATION_DRAFT } from './Agent.jsx';
 import FrameOverlay, { useFrameRect } from './FrameOverlay.jsx';
 import StylePanel from './StylePanel.jsx';
 import Splitter from './Splitter.jsx';
@@ -24,6 +24,8 @@ import SourcesPanel from './sources/SourcesPanel.jsx';
 import { useSources } from './sources/useSources.js';
 import CardInspector from './cards/CardInspector.jsx';
 import ComposeModal from './drafts/ComposeModal.jsx';
+import RemapModal from './drafts/RemapModal.jsx';
+import { remapLines, compKey } from './drafts/remap.js';
 import CardEditOverlay from './cards/CardEditOverlay.jsx';
 import { cardInstances, cardFocusTime, newCardText, newCardRect, newCardGrad } from '../shared/cards.js';
 import { MAIN, trackOf, trackList, trackCfg, patchTrackCfg, nextLineId, exportCombos, applyDict } from '../shared/tracks.js';
@@ -79,6 +81,8 @@ export default function App({ project, onProjectChange }) {
   const [tab, setTab] = useState(() => ls.get('zk.tab', ''));
   const [vmodal, setVmodal] = useState(null); // { key, isNew }
   const [compose, setCompose] = useState(null); // AI 구성 초안 창: { key: 다시 구성할 영상 | '' = 새 영상 }
+  const [remap, setRemap] = useState(null); // 구성 변경 후 대사 재배치 확인: { k, rows }
+  const [agentAsk, setAgentAsk] = useState(null); // 어시스턴트에 바로 보낼 요청 { text, n }
   const [phome, setPhome] = useState(null);
   const [projectPrompt, setProjectPrompt] = useState(null);
   const [closingProject, setClosingProject] = useState(false);
@@ -928,6 +932,26 @@ export default function App({ project, onProjectChange }) {
     const next = { ...script, meta: { ...script.meta, [k]: { ...(script.meta[k] || {}), ...m } }, videos: isNew ? [...script.videos, k] : script.videos, [k]: script[k] || [] };
     setScript(next); setVmodal(null); setTab(k);
     try { await save(next); say(isNew ? `영상 추가: ${m.title}` : `영상 설정 저장: ${m.title}`, 'ok'); } catch (e) { say(e.message, 'err'); }
+    // 구성(구간)이 바뀌었고 대사가 있으면 같은 장면 위치로 옮길지 확인
+    if (!isNew && compKey(script.meta[k]) !== compKey(next.meta[k]) && (next[k] || []).length) {
+      const rows = remapLines(script.meta[k], next.meta[k], next[k]);
+      if (rows.length) setRemap({ k, rows });
+    }
+  };
+  const applyRemap = async (moves, removeIds) => {
+    const { k } = remap; setRemap(null);
+    const rm = new Set(removeIds);
+    const n = { ...script, [k]: (script[k] || []).filter((l) => !rm.has(l.id)).map((l) => (l.id in moves ? { ...l, start: moves[l.id] } : l)) };
+    setScript(n);
+    try { await save(n); say(`대사 ${Object.keys(moves).length}줄을 새 구성의 같은 장면 위치로 옮겼습니다${rm.size ? ` · ${rm.size}줄 삭제` : ''}`, 'ok'); } catch (e) { say(e.message, 'err'); }
+  };
+  // 어시스턴트 '적용 취소'용: 영상별 대사와 발음 사전
+  const snapshotLines = () => ({ lines: Object.fromEntries((script.videos || []).map((k) => [k, script[k] || []])), pronunciation: script.pronunciation,
+    trackDicts: Object.fromEntries((script.tracks || []).map((t) => [t.id, t.pronunciation])) });
+  const restoreLines = (snap) => {
+    setScript((s) => ({ ...s, ...Object.fromEntries(Object.entries(snap.lines).filter(([k]) => (s.videos || []).includes(k))), pronunciation: snap.pronunciation,
+      ...(s.tracks ? { tracks: s.tracks.map((t) => (t.id in snap.trackDicts ? { ...t, pronunciation: snap.trackDicts[t.id] } : t)) } : {}) }));
+    setDirty(true);
   };
   const deleteVideo = async (k) => {
     const { [k]: _l, ...rest } = script; const { [k]: _m, ...meta2 } = script.meta;
@@ -941,7 +965,7 @@ export default function App({ project, onProjectChange }) {
     if (key) {
       const cur = script.meta[key];
       await saveVideo({ ...m, undo: { at: new Date().toISOString(), title: cur.title, src: cur.src, segs: cur.segs, chapters: cur.chapters || [] } }, key);
-      say(`구성 초안을 ‘${m.title}’에 적용했습니다 (영상 설정 창에서 되돌리기 가능). 대사 시각은 그대로라 확인이 필요합니다.`, 'ok');
+      say(`구성 초안을 ‘${m.title}’에 적용했습니다 (영상 설정 창에서 되돌리기 가능)`, 'ok');
     } else await saveVideo({ date: '', end: ['', ''], end_card: 4, ...m }, null);
   };
   const setProject = (patch) => { setScript((x) => ({ ...x, project: { ...(x.project || {}), ...patch } })); setDirty(true); };
@@ -994,6 +1018,8 @@ export default function App({ project, onProjectChange }) {
     {tmodal && <TrackModal mode={tmodal.mode} track={tracks.find((t) => t.id === tmodal.id)} tracks={tracks} current={track}
       onSave={(t) => { saveTrack(t); setTmodal(null); }} onDelete={deleteTrack} onTranslate={translateTrack}
       aiReady={!!keys[ai.provider]} onClose={() => setTmodal(null)} say={say} />}
+    {remap && <RemapModal title={script.meta[remap.k]?.title || remap.k} rows={remap.rows} multiTrack={tracks.length > 1}
+      trackName={(l) => tracks.find((t) => t.id === trackOf(l))?.name || ''} onApply={applyRemap} onClose={() => setRemap(null)} />}
     {compose && <ComposeModal projectId={project.id} ai={ai} aiKey={keys[ai.provider]} onOpenSettings={() => setModal('settings')}
       sources={S.items || []} usage={S.usage} videos={(script.videos || []).map((k) => ({ key: k, title: script.meta[k]?.title || k }))}
       initialKey={compose.key || ''} onApply={applyComposition} onClose={() => setCompose(null)} say={say} />}
@@ -1008,7 +1034,8 @@ export default function App({ project, onProjectChange }) {
       onEditProject={() => setModal('project')} say={say}
       onUseAsVideo={(s) => setVmodal({ isNew: true, src: s.path, title: s.title })}
       appendTitle={script.videos?.includes(tab) && meta ? meta.title || tab : ''} onAppend={(s) => setVmodal({ key: tab, append: s.path })}
-      onCompose={() => setCompose({ key: '' })} />
+      onCompose={() => setCompose({ key: '' })}
+      evidenceKey={script.videos?.includes(tab) ? tab : ''} evidenceTitle={meta?.title || tab} />
     {lay.srcOpen && <Splitter axis="x" getStart={() => lay.src} onDrag={(d, v) => setL('src', clamp(v + d, 240, 720))} onReset={() => setL('src', DEFAULT_LAYOUT.src)} />}
   </>);
   const dropOverlay = dragging && !lay.srcOpen && <div className="drop-overlay" aria-hidden="true"><b>놓으면 소스로 추가합니다</b><small>영상 · 이미지 · 텍스트</small></div>;
@@ -1266,8 +1293,12 @@ export default function App({ project, onProjectChange }) {
           </>) : (
             <div className="lines-empty">
               <h3>이 트랙에 아직 대사가 없습니다</h3>
-              <p>현재 재생 위치 <b>{fmt(editTime)}</b>에 첫 대사를 추가하세요.</p>
-              <button className="accent" onClick={addLine}>＋ 첫 대사 추가</button>
+              <p>현재 재생 위치 <b>{fmt(editTime)}</b>에 첫 대사를 추가하거나, AI에게 영상 전체의 나레이션 초안을 받으세요.</p>
+              <div className="empty-actions">
+                <button className="accent" onClick={addLine}>＋ 첫 대사 추가</button>
+                <button className="primary" title="편집본 근거(장면·원본 말소리)와 소스로 대사 초안을 제안받아 대사별로 적용/무시"
+                  onClick={() => { setAsstOpen(true); setAgentAsk({ text: NARRATION_DRAFT, n: Date.now() }); }}>✦ AI 나레이션 초안</button>
+              </div>
             </div>
           )}
 
@@ -1294,6 +1325,7 @@ export default function App({ project, onProjectChange }) {
           </div>
           <div className="asst-b" style={{ display: asstOpen ? undefined : 'none' }}>
             <Agent key={agentThread} projectId={project.id} keys={keys} ai={ai} mode={side} sourceUsage={S.usage} sourceTotal={S.items?.length || 0}
+              evidenceKey={side === 'lines' ? tab : null} ask={agentAsk} onSnapshot={snapshotLines} onRestore={restoreLines}
               onOpenSources={() => openSources('context')} msgs={threadState?.msgs || []} busy={!!threadState?.busy}
               setMsgs={(update) => updateAgentThread((thread) => ({ msgs: update(thread.msgs || []) }))}
               setBusy={(busy) => updateAgentThread(() => ({ busy }))}

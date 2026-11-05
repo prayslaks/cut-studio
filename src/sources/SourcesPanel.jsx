@@ -124,7 +124,7 @@ function BulkAnalysis({ items, S, elKey, onNeedKey, onCompose, say }) {
 }
 
 // NotebookLM식 소스 패널: 여러 자료를 한 번에 올리고, 내용과 AI에 실제로 가는 컨텍스트를 확인·제어
-export default function SourcesPanel({ S, open, onToggle, view, setView, dragging, pickRequest, usedPaths, brief, onEditProject, onUseAsVideo, appendTitle, onAppend, elKey, onNeedKey, onCompose, say }) {
+export default function SourcesPanel({ S, open, onToggle, view, setView, dragging, pickRequest, usedPaths, brief, onEditProject, onUseAsVideo, appendTitle, onAppend, elKey, onNeedKey, onCompose, evidenceKey, evidenceTitle, say }) {
   const inputRef = useRef(null);
   const [draft, setDraft] = useState(false);
   const [linking, setLinking] = useState(false);
@@ -169,7 +169,7 @@ export default function SourcesPanel({ S, open, onToggle, view, setView, draggin
 
       <div className="srcdock-b">
         {view === 'context' ? (
-          <ContextPreview S={S} brief={brief} onEditProject={onEditProject} onOpen={(id) => setView(`src:${id}`)} />
+          <ContextPreview S={S} brief={brief} onEditProject={onEditProject} onOpen={(id) => setView(`src:${id}`)} evidenceKey={evidenceKey} evidenceTitle={evidenceTitle} />
         ) : detail ? (
           <SourceDetail key={detail.id} s={detail} S={S} used={usedPaths.has(detail.path)} onBack={() => setView('list')} onUseAsVideo={onUseAsVideo} appendTitle={appendTitle} onAppend={onAppend} elKey={elKey} onNeedKey={onNeedKey} say={say} />
         ) : (<>

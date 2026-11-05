@@ -32,6 +32,11 @@ const QUICK = [
   ['발음 점검', '모든 대사에서 TTS가 잘못 읽을 만한 영어·숫자·기호·약어를 찾아서 발음 사전 규칙이나 줄별 발음(tts)으로 고쳐줘.'],
   ['톤 통일', '전체 대사를 프로젝트 설명에 맞는 톤으로 통일하고, 과장되거나 사실 확인이 필요한 표현은 지적해줘.'],
 ];
+// 나레이션 초안: 편집본 근거(구간별 장면 전환·원본 말소리)가 함께 가므로 위치까지 정해서 add로 제안
+export const NARRATION_DRAFT = '편집본 근거(구간별 장면 전환·원본 말소리)와 프로젝트 소스를 바탕으로 이 영상 전체의 나레이션 초안을 만들어줘. '
+  + '도입-본론-마무리 흐름으로, 챕터가 있으면 챕터마다 핵심을 짚어줘. 원본 말소리가 있는 시간은 비워 두고, 장면이 바뀌는 지점 근처에 대사를 둬. '
+  + '대사 길이는 다음 대사 시작 전에 끝나도록. 기존 대사가 있으면 겹치지 않게 빈 곳만 채우고(add), 고칠 대사는 update로. 각 제안의 reason에 근거(구간·장면·[소스 n])를 짧게 써줘.';
+const SCRIPT_OPS = ['update', 'add', 'delete', 'rule_add', 'rule_remove'];
 const SOURCE_QUICK = [
   ['소스 요약', '선택한 프로젝트 소스에서 현재 영상에 쓸 수 있는 핵심 사실과 확인할 점을 정리해줘. 근거로 삼은 소스 번호와 제목을 표시해줘.'],
   ['소스로 대사 초안', '선택한 프로젝트 소스와 현재 영상의 맥락으로 나레이션 초안을 제안해줘. 근거가 부족한 내용은 구분하고, 대사 추가는 검토 가능한 편집 제안으로 작성해줘.'],
@@ -42,7 +47,7 @@ const ls = {
   set: (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} },
 };
 
-export default function Agent({ keys, ai, mode = 'lines', projectId, sourceUsage, sourceTotal = 0, onOpenSources,
+export default function Agent({ keys, ai, mode = 'lines', projectId, sourceUsage, sourceTotal = 0, onOpenSources, evidenceKey, ask, onSnapshot, onRestore,
   msgs, setMsgs, busy, setBusy, onOpenSettings, buildContext, captureFrame, applyOps, annotate, describeOp, say }) {
   const { provider, model } = ai;
   const [input, setInput] = useState('');
@@ -73,7 +78,7 @@ export default function Agent({ keys, ai, mode = 'lines', projectId, sourceUsage
       }));
       const r = await fetch('/api/agent', {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'x-ai-key': key, 'x-project-id': projectId },
-        body: JSON.stringify({ provider, model, system: buildContext(), messages: payload }),
+        body: JSON.stringify({ provider, model, system: buildContext(), messages: payload, ...(evidenceKey ? { evidenceKey } : {}) }),
       });
       const j = await r.json();
       if (!r.ok) throw new Error(j.error);
@@ -87,14 +92,30 @@ export default function Agent({ keys, ai, mode = 'lines', projectId, sourceUsage
   const apply = (mi, idxs) => {
     const m = msgs[mi];
     const ops = idxs.map((i) => m.ops[i]);
+    // 이 메시지에서 처음 대사·사전을 바꿀 때 그 전 상태를 남겨 '적용 취소'로 한 번에 되돌림
+    const snap = !m.undo && ops.some((op) => SCRIPT_OPS.includes(op.op)) ? onSnapshot?.() : null;
     applyOps(ops);
-    setMsgs((all) => all.map((x, i) => (i === mi ? { ...x, done: [...new Set([...(x.done || []), ...idxs])], applied: true } : x)));
+    setMsgs((all) => all.map((x, i) => (i === mi ? { ...x, done: [...new Set([...(x.done || []), ...idxs])], applied: true, ...(snap ? { undo: snap } : {}) } : x)));
     say(`제안 ${ops.length}건 적용 (저장 전)`, 'ok');
   };
+  const undo = (mi) => {
+    const m = msgs[mi];
+    if (!m.undo || !window.confirm('이 메시지에서 적용한 대사·발음 사전 변경을 모두 되돌릴까요? (그 뒤에 직접 고친 대사도 함께 되돌아갑니다)')) return;
+    onRestore(m.undo);
+    setMsgs((all) => all.map((x, i) => (i === mi ? { ...x, undo: undefined, done: (x.done || []).filter((k) => !SCRIPT_OPS.includes(x.ops[k].op)) } : x)));
+    say('적용한 대사 변경을 되돌렸습니다 (저장 전)', 'ok');
+  };
+  // 다른 곳(대사가 빈 화면 등)에서 보낸 요청
+  const lastAsk = useRef(ask?.n);
+  useEffect(() => {
+    if (!ask || ask.n === lastAsk.current) return;
+    lastAsk.current = ask.n;
+    send(ask.text);
+  }, [ask]); // eslint-disable-line react-hooks/exhaustive-deps
   const dismiss = (mi, idx) => setMsgs((all) => all.map((x, i) => (i === mi ? { ...x, skipped: [...(x.skipped || []), idx] } : x)));
 
   const activeSources = sourceUsage?.count || 0;
-  const quick = mode === 'lines' && activeSources > 0 ? [...SOURCE_QUICK, ...QUICK] : QUICK_BY_MODE[mode] || QUICK;
+  const quick = mode === 'lines' ? [['✦ 나레이션 초안', NARRATION_DRAFT], ...(activeSources > 0 ? SOURCE_QUICK : []), ...QUICK] : QUICK_BY_MODE[mode] || QUICK;
 
   return (
     <div className="agent">
@@ -134,6 +155,7 @@ export default function Agent({ keys, ai, mode = 'lines', projectId, sourceUsage
                     </div>
                   );
                 })}
+                {m.undo && <button className="ghost undo" title="이 메시지에서 적용한 대사·발음 사전 변경을 적용 전으로" onClick={() => undo(mi)}>↶ 적용 취소</button>}
                 {m.ops.length > 1 && m.ops.some((_, i) => !m.done?.includes(i) && !m.skipped?.includes(i)) && (
                   <button className="primary all" onClick={() => apply(mi, m.ops.map((_, i) => i).filter((i) => !m.done?.includes(i) && !m.skipped?.includes(i)))}>남은 제안 모두 적용</button>
                 )}

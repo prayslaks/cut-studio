@@ -965,3 +965,15 @@ button.danger { color: var(--err); }
 .cmp-src { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cmp-reason { color: #aab6be; font-size: 11.5px; line-height: 1.5; overflow-wrap: anywhere; }
 @media (max-width: 860px) { .cmp-review { grid-template-columns: minmax(0, 1fr); } }
+
+/* ===== 대사 재배치 · 어시스턴트 적용 취소 ===== */
+.rm-sec { display: flex; flex-direction: column; gap: 6px; }
+.rm-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; max-height: 40vh; overflow: auto; }
+.rm-list li { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 6px; background: var(--panel2); font-size: 12.5px; min-width: 0; }
+.rm-list li.gone { opacity: .75; }
+.rm-list code { color: var(--lime); }
+.rm-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rm-t { flex: none; font-variant-numeric: tabular-nums; color: var(--muted); }
+.rm-t b { color: var(--text); }
+.ops .undo { align-self: flex-start; font-size: 12px; color: var(--warn); }
+.lines-empty .empty-actions { margin-top: 6px; }

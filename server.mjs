@@ -14,6 +14,7 @@ import { createFonts } from './fonts.mjs';
 import { createThumbs, TEMPLATES, THUMB_TOOL } from './thumbs.mjs';
 import { createRegistry, createProjectDir, listDir, probe, upgradeScript, DEFAULT_PARENT, srcPath, segPath, clipPaths, VIDEO_EXT } from './projects.mjs';
 import { baseName } from './shared/clips.js';
+import { fmtTime } from './shared/sources.js';
 import os from 'node:os';
 import { MAIN, trackList, trackLines, exportCombos } from './shared/tracks.js';
 import { APP_NAME } from './shared/app.js';
@@ -417,6 +418,39 @@ async function composeAgent(b, key) {
     rows, skipped, text: r.text || '', usage: r.usage };
 }
 
+// ---------- 편집본 근거: 구간마다 원본 촬영본의 장면 전환·말소리를 편집본 시각으로 옮김 (나레이션 작업용) ----------
+const EVIDENCE_RULE = '편집본 근거가 있으면 장면 전환·원본 말소리를 근거로 대사 위치를 정한다. 원본 말소리가 있는 시간에는 사용자가 요청하지 않는 한 나레이션을 겹치지 않는다. 받아쓰기는 자동 인식이라 고유명사가 틀릴 수 있으니 프로젝트 설명·소스 표기를 우선한다.';
+async function editEvidence(key) {
+  const s = await loadScript(); const meta = s.meta?.[key];
+  if (!meta?.segs?.length) return '';
+  const store = sources;
+  const vids = (await store.list()).filter((x) => x.kind === 'video');
+  const ft = (t) => fmtTime(t, true);
+  const out = []; let off = 0; let any = false;
+  for (const [i, g] of meta.segs.entries()) {
+    const [a, b] = g; const f = segPath(meta, g, WORK); const v = vids.find((x) => x.path === f);
+    const ch = meta.chapters?.[i]?.kr;
+    out.push(`구간 ${i + 1} (편집본 ${ft(off)}–${ft(off + b - a)}) ${v ? v.title : baseName(f)} 원본 ${ft(a)}–${ft(b)}${ch ? ` · 챕터 "${ch}"` : ''}`);
+    if (!v) out.push('  (소스에 없는 촬영본 — 분석 정보 없음)');
+    else {
+      if (v.scenes?.status === 'done') {
+        any = true;
+        const cuts = v.scenes.cuts.filter((t) => t > a && t < b).map((t) => ft(off + t - a));
+        out.push(`  장면 전환: ${cuts.length ? cuts.join(', ') : '없음'}`);
+      }
+      if (v.transcript?.status === 'done') {
+        any = true;
+        const segs = (await store.transcript(v.id)).segments.filter((t) => t.e > a && t.s < b);
+        out.push(segs.length ? segs.map((t) => `  말소리 [${ft(off + Math.max(t.s, a) - a)}–${ft(off + Math.min(t.e, b) - a)}] ${t.s < a || t.e > b ? '(구간 경계에서 잘림) ' : ''}${t.text}`).join('\n') : '  말소리: 없음');
+      }
+      if (v.scenes?.status !== 'done' && v.transcript?.status !== 'done') out.push('  (장면 분석·받아쓰기 안 함)');
+    }
+    off += b - a;
+  }
+  if (!any) return '';
+  return [`편집본 근거 — 영상 "${meta.title || key}"의 구간마다 원본 촬영본의 장면 전환과 말소리(받아쓰기)를 편집본 시각으로 옮긴 것. 나레이션 시작 시각은 이 편집본 시각 기준이다.`, ...out].join('\n');
+}
+
 // ---------- 나레이션 트랙 번역 (트랙 복제 시) ----------
 const TRANSLATE_TOOL = {
   name: 'translated_lines',
@@ -591,6 +625,8 @@ const server = http.createServer(async (req, res) => {
       const projectId = req.headers['x-project-id'];
       if (projectId && projectId !== P?.id) return fail(res, 409, '열린 프로젝트가 바뀌었습니다. 프로젝트를 다시 여세요.');
       const b = JSON.parse(await readBody(req));
+      // 대사 작업: 지금 영상의 편집본 근거(구간별 장면·말소리)를 시스템 프롬프트에 붙임
+      if (P && b.evidenceKey) { const ev = await editEvidence(b.evidenceKey); if (ev) b.system = `${b.system || ''}\n\n${ev}\n${EVIDENCE_RULE}`; }
       return send(res, 200, await agentCall(b, req.headers['x-ai-key'], EDIT_TOOL, false, { sources: src }));
     }
     // ---- 설정 ----
@@ -639,6 +675,8 @@ const server = http.createServer(async (req, res) => {
       const q = Object.fromEntries(url.searchParams); if (!(await hasVideo(q.key))) return fail(res, 400, 'bad key');
       return send(res, 200, await thumbs.still(q.key, +q.t || 0, Math.max(80, Math.min(640, +q.w || 240))), 'image/jpeg');
     }
+    m = /^\/api\/videos\/([A-Za-z0-9_-]+)\/evidence$/.exec(p);
+    if (m && req.method === 'GET') return send(res, 200, { text: await editEvidence(m[1]), rule: EVIDENCE_RULE });
     if (p === '/api/compose' && req.method === 'POST') {
       if (req.headers['x-project-id'] !== P.id) return fail(res, 409, '열린 프로젝트가 바뀌었습니다. 프로젝트를 다시 여세요.');
       return send(res, 200, await composeAgent(JSON.parse(await readBody(req)), req.headers['x-ai-key']));

@@ -13,7 +13,27 @@ function TextBlock({ text }) {
 }
 
 // AI 요청에 실제로 붙는 소스 컨텍스트를 그대로 보여줌 (서버가 요청을 만들 때와 같은 구성)
-export default function ContextPreview({ S, brief, onEditProject, onOpen }) {
+// 편집본 근거: 지금 영상의 구간별 장면·원본 말소리 (대사 작업 때 어시스턴트에 함께 감)
+function Evidence({ k, title, items }) {
+  const [ev, setEv] = useState(null);
+  useEffect(() => {
+    if (!k) return undefined;
+    let alive = true;
+    fetch(`/api/videos/${k}/evidence`).then((r) => r.json()).then((d) => { if (alive) setEv(d); }).catch(() => { if (alive) setEv({ text: '' }); });
+    return () => { alive = false; };
+  }, [k, items]);
+  if (!k) return null;
+  return (
+    <section className="ctx-brief">
+      <b>편집본 근거 · ‘{title}’</b>
+      <small className="muted">대사 탭에서 어시스턴트에 함께 보냅니다 (나레이션 위치를 정하는 근거).</small>
+      {!ev ? <small className="muted">불러오는 중…</small> : ev.text ? <TextBlock text={ev.text} />
+        : <p className="muted sm">이 영상의 구간에 장면 분석·받아쓰기를 한 소스 촬영본이 없습니다.</p>}
+    </section>
+  );
+}
+
+export default function ContextPreview({ S, brief, onEditProject, onOpen, evidenceKey, evidenceTitle }) {
   const [data, setData] = useState(null);
   const [err, setErr] = useState('');
   useEffect(() => {
@@ -31,6 +51,7 @@ export default function ContextPreview({ S, brief, onEditProject, onOpen }) {
         {brief ? <TextBlock text={brief} /> : <p className="muted sm">없음 — 프로젝트 설정에서 무엇에 대한 영상인지, 톤, 꼭 지킬 사실을 적어 두세요.</p>}
       </section>
 
+      <Evidence k={evidenceKey} title={evidenceTitle} items={S.items} />
       {err && <div className="callout err">{err}</div>}
       {!data && !err && <p className="muted sm">불러오는 중…</p>}
       {data && (<>
