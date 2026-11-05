@@ -47,7 +47,7 @@ function openProject(entry) {
     project: () => { try { return JSON.parse(fs.readFileSync(file, 'utf8')).project || {}; } catch { return {}; } } });
   // 소스 영상 파일이 편집 영상의 구간 원본으로 쓰이는 중인지 — 소스를 지워도 영상 파일은 남김
   const inUse = async (f) => { try { const sc = JSON.parse(await fsp.readFile(file, 'utf8')); return Object.values(sc.meta || {}).some((m) => clipPaths(m, dir).includes(f)); } catch { return false; } };
-  const projectSources = createSources({ work: dir, ff: () => ffPath(), probe: (f) => probe(ffprobePath(), f), inUse });
+  const projectSources = createSources({ work: dir, ff: () => ffPath(), probe: (f) => probe(ffprobePath(), f), inUse, elBase: () => EL });
   WORK = dir; SCRIPT = file; TTS_DIR = projectTts; fonts = projectFonts; thumbs = projectThumbs; sources = projectSources;
   P = { ...entry, name: s.project?.name || entry.name, dir };
 }
@@ -75,7 +75,7 @@ if (process.env.ZK_WORK_DIR) { try { registry.open(path.resolve(process.env.ZK_W
 if (registry.current()) { try { openProject(registry.current()); } catch (e) { console.error('프로젝트 열기 실패:', e.message); } }
 const DIST = path.join(HERE, 'dist');
 const PORT = Number(process.env.PORT) || 5178;
-const EL = 'https://api.elevenlabs.io';
+const EL = process.env.ELEVENLABS_BASE_URL || 'https://api.elevenlabs.io';
 const ANTHROPIC = process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com';
 const OPENAI = process.env.OPENAI_BASE_URL || 'https://api.openai.com';
 
@@ -434,8 +434,12 @@ const server = http.createServer(async (req, res) => {
       }
       if (p === '/api/sources/link' && req.method === 'POST') return send(res, 200, await src.linkVideo(JSON.parse(await readBody(req)).path));
       if (p === '/api/sources/select' && req.method === 'POST') return send(res, 200, await src.select(JSON.parse(await readBody(req)).ids));
-      const im = /^\/api\/sources\/([a-z0-9-]+)(\/frames)?$/.exec(p);
-      if (im && im[2] && req.method === 'POST') return send(res, 200, await src.frames(im[1], JSON.parse(await readBody(req))));
+      const im = /^\/api\/sources\/([a-z0-9-]+)(?:\/(frames|scenes|transcribe|transcript))?$/.exec(p);
+      if (im?.[2] === 'frames' && req.method === 'POST') return send(res, 200, await src.frames(im[1], JSON.parse(await readBody(req))));
+      if (im?.[2] === 'scenes' && req.method === 'POST') return send(res, 200, await src.scenes(im[1], JSON.parse(await readBody(req))));
+      if (im?.[2] === 'transcribe' && req.method === 'POST') return send(res, 200, await src.transcribe(im[1], JSON.parse(await readBody(req)), key));
+      if (im?.[2] === 'transcript' && req.method === 'GET') return send(res, 200, await src.transcript(im[1]));
+      if (im?.[2] === 'transcript' && req.method === 'PUT') return send(res, 200, await src.saveTranscript(im[1], JSON.parse(await readBody(req, 8 * 1024 * 1024)).segments));
       if (im && !im[2] && req.method === 'PATCH') return send(res, 200, await src.update(im[1], JSON.parse(await readBody(req, 2 * 1024 * 1024))));
       if (im && !im[2] && req.method === 'DELETE') return send(res, 200, await src.remove(im[1]));
       return fail(res, 404, 'not found');

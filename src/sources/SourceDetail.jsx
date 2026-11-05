@@ -1,10 +1,11 @@
 import { useRef, useState } from 'react';
 import { MAX_SOURCE_TEXT, MAX_NOTE, MAX_FRAMES, FRAME_COUNTS, fmtTime, fmtBytes } from '../../shared/sources.js';
+import VideoAnalysis from './VideoAnalysis.jsx';
 
 const KIND = { text: '텍스트', image: '이미지', video: '영상' };
 
 // 소스 하나의 내용 확인·편집. 제목·메모·본문은 '변경 저장'으로 반영, 켜기/프레임은 즉시 반영
-export default function SourceDetail({ s, S, used, onBack, onUseAsVideo, appendTitle, onAppend, say }) {
+export default function SourceDetail({ s, S, used, onBack, onUseAsVideo, appendTitle, onAppend, elKey, onNeedKey, say }) {
   const [draft, setDraft] = useState({ title: s.title, note: s.note || '', text: s.text || '' });
   const [busy, setBusy] = useState('');
   const [playErr, setPlayErr] = useState(false);
@@ -94,6 +95,7 @@ export default function SourceDetail({ s, S, used, onBack, onUseAsVideo, appendT
           ))}
           {!frames.length && <small className="muted">대표 장면이 없습니다. 영상 정보와 메모만 전달됩니다.</small>}
         </div>
+        <VideoAnalysis s={s} S={S} cur={cur} seek={seek} elKey={elKey} onNeedKey={onNeedKey} say={say} />
         <div className="src-use">
           {used && <small className="tag">편집 영상에 사용 중</small>}
           <button className="sm" onClick={() => onUseAsVideo(s)} title="이 촬영본으로 새 편집 영상 탭을 만듭니다 (구간·챕터 설정)">새 편집 영상으로</button>

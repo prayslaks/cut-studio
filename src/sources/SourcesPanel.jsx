@@ -4,6 +4,7 @@ import FileBrowser from '../project/FileBrowser.jsx';
 import SourceDetail from './SourceDetail.jsx';
 import ContextPreview from './ContextPreview.jsx';
 import UsageMeter from './UsageMeter.jsx';
+import { RUNNING } from './useSources.js';
 import {
   MAX_SOURCES, MAX_SOURCE_TEXT, TEXT_EXT, VIDEO_EXT, fmtTime, fmtBytes,
 } from '../../shared/sources.js';
@@ -78,8 +79,51 @@ function LinkVideos({ onLink, onClose, jobs }) {
   );
 }
 
+const pct = (a) => (a?.progress ? ` ${Math.round(a.progress * 100)}%` : '');
+function AnalysisBadges({ s }) {
+  const b = [];
+  if (RUNNING.includes(s.scenes?.status)) b.push(`장면 분석 중${pct(s.scenes)}`);
+  else if (s.scenes?.status === 'done') b.push(`장면 ${s.scenes.cuts.length + 1}`);
+  if (RUNNING.includes(s.transcript?.status)) b.push(`받아쓰기 중${pct(s.transcript)}`);
+  else if (s.transcript?.status === 'done') b.push(`받아쓰기 ${s.transcript.count}문장`);
+  if (s.scenes?.status === 'error') b.push('장면 분석 실패');
+  if (s.transcript?.status === 'error' && s.audio !== false) b.push('받아쓰기 실패');
+  if (s.audio === false) b.push('소리 없음');
+  return b.length ? <> · {b.join(' · ')}</> : null;
+}
+
+// 영상 소스를 한 번에 분석: 장면 전환(무료) / 받아쓰기(ElevenLabs 사용량 발생)
+function BulkAnalysis({ items, S, elKey, onNeedKey, say }) {
+  const [busy, setBusy] = useState(false);
+  const vids = items.filter((s) => s.kind === 'video');
+  if (!vids.length) return null;
+  const idle = (a) => !a?.status || a.status === 'error';
+  const needScenes = vids.filter((s) => idle(s.scenes));
+  const needStt = vids.filter((s) => idle(s.transcript) && s.audio !== false);
+  const minutes = Math.max(1, Math.ceil(needStt.reduce((n, s) => n + s.duration, 0) / 60));
+  const running = vids.filter((s) => RUNNING.includes(s.scenes?.status) || RUNNING.includes(s.transcript?.status)).length;
+  const each = async (list, fn) => {
+    setBusy(true);
+    try { for (const s of list) await fn(s); } catch (e) { say(e.message, 'err'); } finally { setBusy(false); }
+  };
+  return (
+    <div className="src-bulk">
+      <span>영상 분석{running ? <small> · 진행 중 {running}</small> : null}</span>
+      <button className="sm" disabled={busy || !needScenes.length} title="장면 전환을 찾아 AI 컨텍스트에 장면 목록으로 넣습니다 (로컬 ffmpeg, 무료)"
+        onClick={() => each(needScenes, (s) => S.scenes(s.id, { sensitivity: 'normal' }))}>장면 분석 {needScenes.length}개</button>
+      <button className="sm" disabled={busy || !needStt.length} title="말소리를 받아써 AI 컨텍스트에 넣습니다 (ElevenLabs, 사용량 발생)"
+        onClick={() => {
+          if (!elKey) { say('설정에서 ElevenLabs API 키를 등록하세요', 'err'); onNeedKey(); return; }
+          if (!window.confirm(`영상 ${needStt.length}개, 약 ${minutes}분 길이의 오디오를 ElevenLabs로 보내 받아쓰기합니다. 사용량(요금)이 발생합니다. 진행할까요?`)) return;
+          const lang = (() => { try { return localStorage.getItem('zk.stt.lang') || ''; } catch { return ''; } })();
+          each(needStt, (s) => S.transcribe(s.id, { lang }, elKey));
+        }}>받아쓰기 {needStt.length}개 · {minutes}분</button>
+    </div>
+  );
+}
+
 // NotebookLM식 소스 패널: 여러 자료를 한 번에 올리고, 내용과 AI에 실제로 가는 컨텍스트를 확인·제어
-export default function SourcesPanel({ S, open, onToggle, view, setView, dragging, pickRequest, usedPaths, brief, onEditProject, onUseAsVideo, appendTitle, onAppend, say }) {
+export default function SourcesPanel({ S, open, onToggle, view, setView, dragging, pickRequest, usedPaths, brief, onEditProject, onUseAsVideo, appendTitle, onAppend, elKey, onNeedKey, say }) {
   const inputRef = useRef(null);
   const [draft, setDraft] = useState(false);
   const [linking, setLinking] = useState(false);
@@ -126,7 +170,7 @@ export default function SourcesPanel({ S, open, onToggle, view, setView, draggin
         {view === 'context' ? (
           <ContextPreview S={S} brief={brief} onEditProject={onEditProject} onOpen={(id) => setView(`src:${id}`)} />
         ) : detail ? (
-          <SourceDetail key={detail.id} s={detail} S={S} used={usedPaths.has(detail.path)} onBack={() => setView('list')} onUseAsVideo={onUseAsVideo} appendTitle={appendTitle} onAppend={onAppend} say={say} />
+          <SourceDetail key={detail.id} s={detail} S={S} used={usedPaths.has(detail.path)} onBack={() => setView('list')} onUseAsVideo={onUseAsVideo} appendTitle={appendTitle} onAppend={onAppend} elKey={elKey} onNeedKey={onNeedKey} say={say} />
         ) : (<>
           <div className={`src-drop ${dragging ? 'over' : ''}`}>
             <b>{dragging ? '여기에 놓으면 소스로 추가합니다' : '파일을 끌어다 놓거나 붙여넣기(Ctrl+V)'}</b>
@@ -144,6 +188,7 @@ export default function SourcesPanel({ S, open, onToggle, view, setView, draggin
           {!S.items && !S.error && <p className="muted sm">소스를 불러오는 중…</p>}
           {S.items && (items.length ? (<>
             <UsageMeter usage={S.usage} />
+            <BulkAnalysis items={items} S={S} elKey={elKey} onNeedKey={onNeedKey} say={say} />
             <div className="src-listhead">
               <label className="chk">
                 <input type="checkbox" checked={all} ref={(el) => { if (el) el.indeterminate = some && !all; }} disabled={busy}
@@ -167,6 +212,7 @@ export default function SourcesPanel({ S, open, onToggle, view, setView, draggin
                         {s.kind === 'video' && ` · ${fmtTime(s.duration)} · 프레임 ${s.frames?.length || 0}`}
                         {s.kind === 'video' && !s.copied && ' · 연결'}
                         {s.note && ' · 메모'}
+                        {s.kind === 'video' && <AnalysisBadges s={s} />}
                       </small>
                     </span>
                     {usedPaths.has(s.path) && <small className="tag">편집 중</small>}

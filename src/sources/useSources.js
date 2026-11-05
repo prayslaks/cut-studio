@@ -48,6 +48,8 @@ function sendBlob(url, blob, projectId, onProgress) {
 }
 
 const ACTIVE = ['wait', 'upload', 'process'];
+const ANALYSIS = ['scenes', 'transcript'];
+export const RUNNING = ['queued', 'running'];
 
 // 프로젝트 소스 상태와 서버 호출. 모든 변경 API는 전체 목록을 돌려주므로 그대로 반영한다
 export function useSources(projectId, say) {
@@ -65,8 +67,8 @@ export function useSources(projectId, say) {
     return data;
   }, [say]);
 
-  const call = useCallback(async (method, url, body) => {
-    const r = await fetch(url, { method, headers: { 'x-project-id': projectId, ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
+  const call = useCallback(async (method, url, body, headers = {}) => {
+    const r = await fetch(url, { method, headers: { 'x-project-id': projectId, ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...headers },
       body: body !== undefined ? JSON.stringify(body) : undefined });
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(data.error || `${r.status} ${r.statusText}`);
@@ -125,6 +127,23 @@ export function useSources(projectId, say) {
   const link = (path) => enqueue([{ id: crypto.randomUUID(), linkPath: path, name: path.split(/[\\/]/).pop(), kind: 'video', status: 'wait', progress: 0 }]);
   const dismissJob = (id) => setJobs((js) => js.filter((j) => j.id !== id));
 
+  // 영상 분석(장면·받아쓰기)이 진행 중이면 목록을 1초마다 다시 받아 진행률 갱신, 끝나면 알림
+  const analyzing = (items || []).some((s) => ANALYSIS.some((k) => RUNNING.includes(s[k]?.status)));
+  useEffect(() => {
+    if (!analyzing) return;
+    const t = setInterval(() => { call('GET', '/api/sources').catch(() => {}); }, 1000);
+    return () => clearInterval(t);
+  }, [analyzing, call]);
+  const lastStatus = useRef({});
+  useEffect(() => {
+    for (const s of items || []) for (const k of ANALYSIS) {
+      const key = `${s.id}:${k}`; const st = s[k]?.status; const prev = lastStatus.current[key];
+      if (RUNNING.includes(prev) && st === 'done') say(`${k === 'scenes' ? '장면 분석' : '받아쓰기'} 완료: ${s.title}`, 'ok');
+      if (RUNNING.includes(prev) && st === 'error') say(`${k === 'scenes' ? '장면 분석' : '받아쓰기'} 실패: ${s.title} — ${s[k].error}`, 'err');
+      lastStatus.current[key] = st;
+    }
+  }, [items, say]);
+
   const active = jobs.filter((j) => ACTIVE.includes(j.status)).length;
   const usage = useMemo(() => contextUsage(items || []), [items]);
 
@@ -136,5 +155,9 @@ export function useSources(projectId, say) {
     remove: (id) => call('DELETE', `/api/sources/${id}`),
     frames: (id, b) => call('POST', `/api/sources/${id}/frames`, b),
     preview: () => call('GET', '/api/sources/context'),
+    scenes: (id, b) => call('POST', `/api/sources/${id}/scenes`, b),
+    transcribe: (id, b, key) => call('POST', `/api/sources/${id}/transcribe`, b, { 'x-el-key': key || '' }),
+    transcript: (id) => call('GET', `/api/sources/${id}/transcript`),
+    saveTranscript: (id, segments) => call('PUT', `/api/sources/${id}/transcript`, { segments }),
   };
 }

@@ -989,6 +989,7 @@ export default function App({ project, onProjectChange }) {
   const usedPaths = new Set(Object.values(script.meta || {}).flatMap((m) => filesOf(m)));
   const sourcesDock = (<>
     <SourcesPanel S={S} open={lay.srcOpen} onToggle={() => setL('srcOpen', !lay.srcOpen)} view={srcView} setView={setSrcView}
+      elKey={keys.el} onNeedKey={() => setModal('settings')}
       dragging={dragging} pickRequest={srcPick} usedPaths={usedPaths} brief={script.project?.brief || ''}
       onEditProject={() => setModal('project')} say={say}
       onUseAsVideo={(s) => setVmodal({ isNew: true, src: s.path, title: s.title })}
