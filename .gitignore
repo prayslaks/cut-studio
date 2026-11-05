@@ -8,6 +8,9 @@ projects.json
 !.env.example
 /references.json
 /references.json.*.tmp
+/sources.json
+/sources.json.*.tmp
+/sources/
 /script.json
 /script.*.json
 /tts/

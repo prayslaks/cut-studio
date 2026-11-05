@@ -20,7 +20,8 @@ import Timeline from './Timeline.jsx';
 import VideoModal from './project/VideoModal.jsx';
 import ProjectHome from './project/ProjectHome.jsx';
 import ProjectSettings from './project/ProjectSettings.jsx';
-import ReferenceLibrary from './project/ReferenceLibrary.jsx';
+import SourcesPanel from './sources/SourcesPanel.jsx';
+import { useSources } from './sources/useSources.js';
 import CardInspector from './cards/CardInspector.jsx';
 import CardEditOverlay from './cards/CardEditOverlay.jsx';
 import { cardInstances, cardFocusTime, newCardText, newCardRect, newCardGrad } from '../shared/cards.js';
@@ -53,7 +54,7 @@ const ls = {
   set: (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} },
 };
 
-const DEFAULT_LAYOUT = { mid: 520, asst: 320, stageH: null, canvasH: null, timelineOpen: true, timelineHeight: 100 };
+const DEFAULT_LAYOUT = { mid: 520, asst: 320, src: 300, srcOpen: true, stageH: null, canvasH: null, timelineOpen: true, timelineHeight: 100 };
 
 const pick = (o, ks) => Object.fromEntries(ks.filter((k) => o[k] != null).map((k) => [k, o[k]]));
 function deepMergeObj(a = {}, b = {}) {
@@ -67,8 +68,10 @@ const nextKey = (s) => { for (const c of 'ABCDEFGHIJKLMNOPQRSTUVWXYZ') if (!s.me
 
 export default function App({ project, onProjectChange }) {
   const [script, setScript] = useState(null);
-  const [references, setReferences] = useState(null);
-  const [referencesError, setReferencesError] = useState('');
+  const [srcView, setSrcView] = useState('list'); // 소스 패널: 'list' | 'context' | 'src:<id>'
+  const [srcPick, setSrcPick] = useState(0); // 값이 바뀌면 소스 파일 선택창을 엶
+  const [dragging, setDragging] = useState(false);
+  const dragDepth = useRef(0);
   const [agentThreads, setAgentThreads] = useState({});
   const [dirty, setDirty] = useState(false);
   const [tab, setTab] = useState(() => ls.get('zk.tab', ''));
@@ -140,6 +143,7 @@ export default function App({ project, onProjectChange }) {
   useEffect(() => { if (modal === 'settings') setUnreadErr(0); }, [modal]);
   useEffect(() => { if (!toast) return; const id = setTimeout(() => setToast(null), toast.kind === 'err' ? 8000 : 3500); return () => clearTimeout(id); }, [toast]);
   const T = useThumbs({ say });
+  const S = useSources(project.id, say);
   const C = useCards({ script, setScript, setDirty, tab });
   useEffect(() => { ls.set('zk.asst', asstOpen ? '1' : '0'); }, [asstOpen]);
 
@@ -192,18 +196,6 @@ export default function App({ project, onProjectChange }) {
 
   // ---------- 데이터 로드 ----------
   const refreshTts = useCallback(async () => setTts(await api('/api/tts')), []);
-  const loadProjectReferences = useCallback(async () => {
-    setReferencesError('');
-    try { setReferences(await api('/api/references', { headers: { 'x-project-id': project.id } })); }
-    catch (e) { setReferencesError(e.message); }
-  }, [project.id]);
-  useEffect(() => { loadProjectReferences(); }, [loadProjectReferences]);
-  const saveProjectReferences = async (entries) => {
-    const saved = await api('/api/references', {
-      method: 'PUT', headers: { 'Content-Type': 'application/json', 'x-project-id': project.id }, body: JSON.stringify(entries),
-    });
-    setReferences(saved);
-  };
   useEffect(() => {
     api('/api/script').then((s) => setScript(migrateVoiceProfiles(s))).catch((e) => say(`대본 로드 실패: ${e.message}`, 'err'));
     refreshTts().catch((e) => say(`TTS 목록 로드 실패: ${e.message}`, 'err'));
@@ -474,9 +466,32 @@ export default function App({ project, onProjectChange }) {
     window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h);
   }, [save, say, phome, closingProject]);
   useEffect(() => {
-    const h = (e) => { if (dirty) { e.preventDefault(); e.returnValue = ''; } };
+    const h = (e) => { if (dirty || S.active) { e.preventDefault(); e.returnValue = ''; } };
     window.addEventListener('beforeunload', h); return () => window.removeEventListener('beforeunload', h);
-  }, [dirty]);
+  }, [dirty, S.active]);
+
+  // ---------- 소스: 창 어디에 끌어다 놓거나 붙여넣어도 소스로 추가 ----------
+  const openSources = useCallback((view = 'list') => { setSrcView(view); setLay((x) => ({ ...x, srcOpen: true })); }, []);
+  const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+  const dropHandlers = {
+    onDragEnter: (e) => { if (!hasFiles(e)) return; e.preventDefault(); dragDepth.current++; setDragging(true); },
+    onDragOver: (e) => { if (!hasFiles(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; },
+    onDragLeave: (e) => { if (!hasFiles(e)) return; dragDepth.current = Math.max(0, dragDepth.current - 1); if (!dragDepth.current) setDragging(false); },
+    onDrop: (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault(); dragDepth.current = 0; setDragging(false);
+      if (e.dataTransfer.files.length) { openSources('list'); S.upload(e.dataTransfer.files); }
+    },
+  };
+  useEffect(() => {
+    const h = (e) => {
+      if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable || document.querySelector('.modal-bg')) return;
+      const files = [...(e.clipboardData?.files || [])];
+      if (!files.length) return;
+      e.preventDefault(); openSources('list'); S.upload(files);
+    };
+    window.addEventListener('paste', h); return () => window.removeEventListener('paste', h);
+  }, [S, openSources]);
 
   // ---------- ElevenLabs ----------
   const loadVoices = async (rethrow = false) => {
@@ -905,6 +920,7 @@ export default function App({ project, onProjectChange }) {
       || (batch && batch.done < batch.total) || (exportJob && !exportJob.finished)) {
       throw new Error('진행 중인 저장, 생성 또는 내보내기가 끝난 뒤 프로젝트를 전환하세요.');
     }
+    if (S.active) throw new Error('소스 업로드가 끝난 뒤 프로젝트를 전환하세요.');
     stop();
     if (dirty) {
       const choice = await new Promise((resolve) => setProjectPrompt({ resolve }));
@@ -929,6 +945,7 @@ export default function App({ project, onProjectChange }) {
   };
   const projectModals = (<>
     {vmodal && <VideoModal vkey={vmodal.key} meta={vmodal.key ? script.meta[vmodal.key] : null} isNew={!!vmodal.isNew} say={say}
+      initialSrc={vmodal.src} initialTitle={vmodal.title}
       onSave={(m) => saveVideo(m, vmodal.isNew ? null : vmodal.key)} onDelete={() => deleteVideo(vmodal.key)} onClose={() => setVmodal(null)} />}
     {phome && <ProjectHome initialView={phome} beforeOpen={prepareProjectChange} onOpened={onProjectChange} onClose={() => setPhome(null)} />}
     {projectPrompt && <Modal title="프로젝트 변경사항 저장" onClose={() => finishProjectPrompt('cancel')}
@@ -943,9 +960,17 @@ export default function App({ project, onProjectChange }) {
       onSave={(t) => { saveTrack(t); setTmodal(null); }} onDelete={deleteTrack} onTranslate={translateTrack}
       aiReady={!!keys[ai.provider]} onClose={() => setTmodal(null)} say={say} />}
     {modal === 'project' && <ProjectSettings project={script.project || {}} onChange={setProject} dirty={dirty} onSave={() => save()} onClose={() => setModal(null)} say={say} />}
-    {modal === 'references' && <ReferenceLibrary references={references} loadError={referencesError}
-      onSave={saveProjectReferences} onReload={loadProjectReferences} onClose={() => setModal(null)} />}
   </>);
+  // 소스 패널 (작업 화면 왼쪽 끝, 영상이 없을 때도 표시)
+  const usedPaths = new Set(Object.values(script.meta || {}).map((m) => m?.src).filter(Boolean));
+  const sourcesDock = (<>
+    <SourcesPanel S={S} open={lay.srcOpen} onToggle={() => setL('srcOpen', !lay.srcOpen)} view={srcView} setView={setSrcView}
+      dragging={dragging} pickRequest={srcPick} usedPaths={usedPaths} brief={script.project?.brief || ''}
+      onEditProject={() => setModal('project')} say={say}
+      onUseAsVideo={(s) => setVmodal({ isNew: true, src: s.path, title: s.title })} />
+    {lay.srcOpen && <Splitter axis="x" getStart={() => lay.src} onDrag={(d, v) => setL('src', clamp(v + d, 240, 720))} onReset={() => setL('src', DEFAULT_LAYOUT.src)} />}
+  </>);
+  const dropOverlay = dragging && !lay.srcOpen && <div className="drop-overlay" aria-hidden="true"><b>놓으면 소스로 추가합니다</b><small>영상 · 이미지 · 텍스트</small></div>;
   const headerEl = (
       <header>
         <div className="project-bar">
@@ -965,7 +990,6 @@ export default function App({ project, onProjectChange }) {
           <span className="project-caption" title={script.project?.name}>{script.project?.name || project?.name || '프로젝트'}</span>
         </div>
         <div className="cred">
-          <button className="references-button" onClick={() => setModal('references')}>프로젝트 자료{references?.length > 0 && <small>{references.length}</small>}</button>
           {quota && <span className="quota" title="ElevenLabs 사용량">TTS {quota.used?.toLocaleString()} / {quota.limit?.toLocaleString()}자</span>}
           {!apiKey && <button className="accent" onClick={() => setModal('settings')}>API 키 등록 필요</button>}
           {apiKey && !voices.length && <button className="ghost" onClick={() => loadVoices()}>보이스 불러오기</button>}
@@ -984,16 +1008,20 @@ export default function App({ project, onProjectChange }) {
   );
   if (!script.videos?.length || !meta) {
     return (
-      <div className="app">
+      <div className="app" {...dropHandlers}>
         {headerEl}
-        <div className="empty-proj">
-          <h2>첫 영상을 가져오세요</h2>
-          <p className="muted">영상과 기획 메모, 참고 이미지를 이 작업 공간에 모아 편집하세요.</p>
-          <div className="reference-actions">
-            <button className="primary" onClick={() => setVmodal({ isNew: true })}>＋ 영상 가져오기</button>
-            <button onClick={() => setModal('references')}>자료 추가</button>
+        <div className={`empty-layout ${lay.srcOpen ? 'with-sources' : ''}`} style={{ '--sources-width': `${lay.src}px` }}>
+          {sourcesDock}
+          <div className="empty-proj">
+            <h2>소스를 모으고 첫 영상을 가져오세요</h2>
+            <p className="muted">촬영본·기획 메모·대본 초안·레퍼런스 이미지를 한꺼번에 끌어다 놓으면 소스가 됩니다.<br />체크한 소스는 AI가 초안을 만들 때 컨텍스트로 쓰고, 영상 소스는 바로 편집 영상으로 가져올 수 있습니다.</p>
+            <div className="empty-actions">
+              <button className="primary" onClick={() => setVmodal({ isNew: true })}>＋ 영상 가져오기</button>
+              <button onClick={() => { openSources('list'); setSrcPick((n) => n + 1); }}>소스 파일 추가</button>
+            </div>
           </div>
         </div>
+        {dropOverlay}
         {projectModals}
         {modal === 'settings' && <SettingsModal keys={keys} setKey={setKey} remember={remember} setRemember={setRemember} ai={ai} setAi={setAiCfg}
           onTestEl={() => loadVoices(true)} onClose={() => setModal(null)} say={say} log={log} clearLog={() => setLog([])} focus={setFocus} />}
@@ -1013,13 +1041,14 @@ export default function App({ project, onProjectChange }) {
   const threadState = agentThreads[agentThread];
   const updateAgentThread = (update) => setAgentThreads((threads) => ({ ...threads,
     [agentThread]: { ...threads[agentThread], ...update(threads[agentThread] || {}) } }));
-  const activeReferences = references?.filter((item) => item.enabled).length || 0;
 
   return (
-    <div className="app">
+    <div className="app" {...dropHandlers}>
       {headerEl}
 
-      <div className={`layout ${asstOpen ? 'with-assistant' : ''}`} style={{ '--editor-width': `${lay.mid}px`, '--assistant-width': `${lay.asst}px` }}>
+      <div className={`layout ${asstOpen ? 'with-assistant' : ''} ${lay.srcOpen ? 'with-sources' : ''}`}
+        style={{ '--editor-width': `${lay.mid}px`, '--assistant-width': `${lay.asst}px`, '--sources-width': `${lay.src}px` }}>
+        {sourcesDock}
         <section className="left">
           <div className="preview-bar">
             <nav className="tabs" aria-label="프로젝트 영상">
@@ -1218,8 +1247,8 @@ export default function App({ project, onProjectChange }) {
             <button className="ghost" title={asstOpen ? '접기' : 'AI 어시스턴트 열기'} onClick={() => setAsstOpen((o) => !o)}>{asstOpen ? '⟩' : '✦'}</button>
           </div>
           <div className="asst-b" style={{ display: asstOpen ? undefined : 'none' }}>
-            <Agent key={agentThread} projectId={project.id} keys={keys} ai={ai} mode={side} activeReferences={activeReferences}
-              onOpenReferences={() => setModal('references')} msgs={threadState?.msgs || []} busy={!!threadState?.busy}
+            <Agent key={agentThread} projectId={project.id} keys={keys} ai={ai} mode={side} sourceUsage={S.usage} sourceTotal={S.items?.length || 0}
+              onOpenSources={() => openSources('context')} msgs={threadState?.msgs || []} busy={!!threadState?.busy}
               setMsgs={(update) => updateAgentThread((thread) => ({ msgs: update(thread.msgs || []) }))}
               setBusy={(busy) => updateAgentThread(() => ({ busy }))}
               onOpenSettings={() => setModal('settings')} buildContext={buildContext} captureFrame={captureFrame}
@@ -1280,6 +1309,7 @@ export default function App({ project, onProjectChange }) {
           dirty={dirty} onSave={() => save()} job={exportJob} onStart={startExport} onCancel={cancelExport}
           onClose={() => setModal(null)} say={say} />
       )}
+      {dropOverlay}
       {projectModals}
     </div>
   );

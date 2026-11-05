@@ -7,9 +7,10 @@ const r1 = (v) => Math.round(v * 10) / 10;
 const fmtS = (t) => { t = Math.max(0, t || 0); const m = Math.floor(t / 60); return `${m}:${(t - m * 60).toFixed(1).padStart(4, '0')}`; };
 
 // 영상 추가·설정: 원본 파일, 제목·날짜, 사용할 구간(트림)과 구간별 챕터, 엔딩 문구
-export default function VideoModal({ vkey, meta, isNew, onSave, onDelete, onClose, say }) {
-  const [step, setStep] = useState(isNew ? 'pick' : 'edit');
-  const [m, setM] = useState(() => ({ title: '', date: '', src: '', segs: [], chapters: [], end: ['', ''], end_card: 4, ...(meta || {}) }));
+// initialSrc: 소스 패널의 영상을 편집 영상으로 가져올 때 파일 선택 단계를 건너뜀
+export default function VideoModal({ vkey, meta, isNew, initialSrc, initialTitle, onSave, onDelete, onClose, say }) {
+  const [step, setStep] = useState(isNew && !initialSrc ? 'pick' : 'edit');
+  const [m, setM] = useState(() => ({ title: initialTitle || '', date: '', src: initialSrc || '', segs: [], chapters: [], end: ['', ''], end_card: 4, ...(meta || {}) }));
   const [info, setInfo] = useState(null);
   const [cur, setCur] = useState(0);
   const vref = useRef(null);
@@ -27,6 +28,7 @@ export default function VideoModal({ vkey, meta, isNew, onSave, onDelete, onClos
     setM((x) => ({ ...x, src: file, title: x.title || name, segs: x.segs.length ? x.segs : d.duration ? [[0, r1(d.duration)]] : [] }));
     setInfo(d); setStep('edit');
   };
+  useEffect(() => { if (isNew && initialSrc) pick(initialSrc); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const dur = info?.duration || 0;
   const segs = m.segs || [];

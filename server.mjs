@@ -16,7 +16,7 @@ import { createRegistry, createProjectDir, listDir, probe, upgradeScript, DEFAUL
 import os from 'node:os';
 import { MAIN, trackList, trackLines, exportCombos } from './shared/tracks.js';
 import { APP_NAME } from './shared/app.js';
-import { loadReferences, saveReferences, withReferences } from './references.mjs';
+import { createSources } from './sources.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // 전역 설정(ffmpeg·기본 폰트)은 studio.config.json, 작업 데이터는 프로젝트 폴더별
@@ -30,7 +30,7 @@ const registry = createRegistry(HERE);
 
 // ---- 현재 프로젝트 ----
 let P = null; // { id, name, dir, script, tts, fonts, thumbs }
-let WORK = '', SCRIPT = '', TTS_DIR = '', fonts = null, thumbs = null;
+let WORK = '', SCRIPT = '', TTS_DIR = '', fonts = null, thumbs = null, sources = null;
 const outDir = () => { try { const o = JSON.parse(fs.readFileSync(SCRIPT, 'utf8')).project?.outDir; if (o) return path.resolve(WORK, o); } catch {} return path.join(WORK, 'output'); };
 function openProject(entry) {
   const dir = path.resolve(entry.dir);
@@ -45,7 +45,10 @@ function openProject(entry) {
   fs.mkdirSync(projectFonts.DIR, { recursive: true }); fs.mkdirSync(projectTts, { recursive: true });
   const projectThumbs = createThumbs({ work: dir, root: dir, ffPath: () => ffPath(), fontsMap: () => projectFonts.fontsMap(), defaultFont: () => defaultFont(),
     project: () => { try { return JSON.parse(fs.readFileSync(file, 'utf8')).project || {}; } catch { return {}; } } });
-  WORK = dir; SCRIPT = file; TTS_DIR = projectTts; fonts = projectFonts; thumbs = projectThumbs;
+  // 소스 영상 파일이 편집 영상(meta.src)으로 쓰이는 중인지 — 소스를 지워도 영상 파일은 남김
+  const inUse = async (f) => { try { const sc = JSON.parse(await fsp.readFile(file, 'utf8')); return Object.values(sc.meta || {}).some((m) => srcPath(m, dir) === f); } catch { return false; } };
+  const projectSources = createSources({ work: dir, ff: () => ffPath(), probe: (f) => probe(ffprobePath(), f), inUse });
+  WORK = dir; SCRIPT = file; TTS_DIR = projectTts; fonts = projectFonts; thumbs = projectThumbs; sources = projectSources;
   P = { ...entry, name: s.project?.name || entry.name, dir };
 }
 const need = () => { if (!P) throw Object.assign(new Error('열린 프로젝트가 없습니다'), { status: 409 }); };
@@ -183,9 +186,10 @@ async function agentModels(provider, key) {
 }
 
 // messages: [{ role, text, image?, parts? }]  parts = [{ text } | { image: dataUrl }] (이미지 여러 장 + 라벨)
-async function agentCall(b, key, tool = EDIT_TOOL, force = false, referenceDir = null) {
+// ctx: { sources, images } — 요청 시작 시점 프로젝트의 소스를 마지막 사용자 메시지에 첨부 (images=false면 텍스트만)
+async function agentCall(b, key, tool = EDIT_TOOL, force = false, ctx = null) {
   if (!key) throw Object.assign(new Error('API 키가 없습니다'), { status: 400 });
-  if (referenceDir) b = withReferences(b, await loadReferences(referenceDir));
+  if (ctx?.sources) b = await ctx.sources.attach(b, { images: ctx.images !== false });
   const dataUrl = (u) => /^data:(.+?);base64,(.*)$/.exec(u || '');
   const partsOf = (m) => m.parts || [...(m.image ? [{ image: m.image }] : []), { text: m.text }];
   if (b.provider === 'anthropic') {
@@ -233,7 +237,7 @@ async function agentCall(b, key, tool = EDIT_TOOL, force = false, referenceDir =
 }
 
 async function thumbsAgent(b, key) {
-  const work = WORK;
+  const store = sources;
   const s = await loadScript(); const meta = s.meta?.[b.key]; const pj = s.project || {};
   if (!meta) throw Object.assign(new Error('bad key'), { status: 400 });
   const count = Math.max(1, Math.min(10, b.count || 4));
@@ -261,7 +265,7 @@ async function thumbsAgent(b, key) {
     parts.push({ image: `data:image/jpeg;base64,${(await fsp.readFile(c.file)).toString('base64')}` });
   }
   parts.push({ text: `썸네일 초안을 최대 ${count}개 제안해줘(좋은 후보가 부족하면 그보다 적게).${b.brief ? ` 추가 요청: ${b.brief}` : ''}` });
-  const r = await agentCall({ provider: b.provider, model: b.model, system, messages: [{ role: 'user', parts }] }, key, THUMB_TOOL, true, work);
+  const r = await agentCall({ provider: b.provider, model: b.model, system, messages: [{ role: 'user', parts }] }, key, THUMB_TOOL, true, { sources: store });
   const drafts = (r.edits?.drafts || []).slice(0, count);
   const batch = Date.now().toString(36);
   const out = [];
@@ -295,7 +299,7 @@ const YT_TOOL = {
 };
 
 async function youtubeAgent(b, key) {
-  const work = WORK;
+  const store = sources;
   const s = await loadScript(); const meta = s.meta?.[b.key]; const pj = s.project || {};
   if (!meta) throw Object.assign(new Error('bad key'), { status: 400 });
   const offs = []; let t = 0; for (const [a, e] of meta.segs) { offs.push(t); t += e - a; }
@@ -326,7 +330,7 @@ async function youtubeAgent(b, key) {
   if (b.thumbId) {
     try { parts.push({ text: '사용할 썸네일:' }, { image: `data:image/png;base64,${(await fsp.readFile(thumbs.file(b.thumbId))).toString('base64')}` }); } catch {}
   }
-  const r = await agentCall({ provider: b.provider, model: b.model, system, messages: [{ role: 'user', parts }] }, key, YT_TOOL, true, work);
+  const r = await agentCall({ provider: b.provider, model: b.model, system, messages: [{ role: 'user', parts }] }, key, YT_TOOL, true, { sources: store });
   if (!r.edits) throw new Error(r.text || 'AI가 제안을 반환하지 않았습니다');
   return { ...r.edits, text: r.text || '', usage: r.usage };
 }
@@ -344,7 +348,7 @@ const TRANSLATE_TOOL = {
 };
 
 async function translateTrack(b, key) {
-  const work = WORK;
+  const store = sources;
   const s = await loadScript(); const pj = s.project || {};
   if (!s.meta?.[b.key]) throw Object.assign(new Error('bad key'), { status: 400 });
   const src = trackLines(s, b.key, b.from || MAIN).sort((x, y) => x.start - y.start);
@@ -360,7 +364,7 @@ async function translateTrack(b, key) {
   ].join('\n');
   const list = JSON.stringify(src.map((l, i) => ({ id: l.id, slot_s: slot(i), text: l.text })));
   const r = await agentCall({ provider: b.provider, model: b.model, system,
-    messages: [{ role: 'user', text: `영상: ${s.meta[b.key].title || b.key}\n대사:\n${list}` }] }, key, TRANSLATE_TOOL, true, work);
+    messages: [{ role: 'user', text: `영상: ${s.meta[b.key].title || b.key}\n대사:\n${list}` }] }, key, TRANSLATE_TOOL, true, { sources: store, images: false });
   return { lines: r.edits?.lines || [], usage: r.usage };
 }
 
@@ -406,12 +410,34 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { path: f, name: path.basename(f), ...(await probe(ffprobePath(), f)) });
     }
     if (p === '/api/script' && req.method === 'GET') return send(res, 200, await loadScript());
-    if (p === '/api/references' && (req.method === 'GET' || req.method === 'PUT')) {
+    // ---- 프로젝트 소스 (AI 컨텍스트) ----
+    if (p.startsWith('/api/sources')) {
+      const src = sources;
+      // 미리보기용 파일은 <img>/<video>가 직접 요청 (헤더 없음, 읽기 전용)
+      const fm = /^\/api\/sources\/([a-z0-9-]+)\/(file|frames\/(\d+)\.jpg)$/.exec(p);
+      if (fm && req.method === 'GET') {
+        if (fm[3]) return streamFile(req, res, src.frameFile(fm[1], fm[3]), 'image/jpeg');
+        const f = await src.file(fm[1]);
+        return streamFile(req, res, f.file, f.type);
+      }
       if (req.headers['x-project-id'] !== P.id) return fail(res, 409, '열린 프로젝트가 바뀌었습니다. 프로젝트를 다시 여세요.');
-      const work = WORK;
-      if (req.method === 'GET') return send(res, 200, await loadReferences(work));
-      const entries = JSON.parse(await readBody(req, 30 * 1024 * 1024));
-      return send(res, 200, await saveReferences(work, entries));
+      if (p === '/api/sources' && req.method === 'GET') return send(res, 200, { items: await src.list() });
+      if (p === '/api/sources/context' && req.method === 'GET') return send(res, 200, await src.preview());
+      if (p === '/api/sources/text' && req.method === 'POST') return send(res, 200, await src.addText(JSON.parse(await readBody(req, 2 * 1024 * 1024))));
+      if (p === '/api/sources/upload' && req.method === 'POST') {
+        const name = url.searchParams.get('name') || '';
+        const kind = url.searchParams.get('kind');
+        if (kind === 'image') return send(res, 200, await src.addImage(req, name));
+        if (kind === 'video') return send(res, 200, await src.addVideo(req, name));
+        return fail(res, 400, '업로드 종류를 지정하세요');
+      }
+      if (p === '/api/sources/link' && req.method === 'POST') return send(res, 200, await src.linkVideo(JSON.parse(await readBody(req)).path));
+      if (p === '/api/sources/select' && req.method === 'POST') return send(res, 200, await src.select(JSON.parse(await readBody(req)).ids));
+      const im = /^\/api\/sources\/([a-z0-9-]+)(\/frames)?$/.exec(p);
+      if (im && im[2] && req.method === 'POST') return send(res, 200, await src.frames(im[1], JSON.parse(await readBody(req))));
+      if (im && !im[2] && req.method === 'PATCH') return send(res, 200, await src.update(im[1], JSON.parse(await readBody(req, 2 * 1024 * 1024))));
+      if (im && !im[2] && req.method === 'DELETE') return send(res, 200, await src.remove(im[1]));
+      return fail(res, 404, 'not found');
     }
     if (p === '/api/script' && req.method === 'PUT') {
       const body = await readBody(req);
@@ -474,11 +500,11 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/agent/models') return send(res, 200, await agentModels(url.searchParams.get('provider'), req.headers['x-ai-key']));
     if (p === '/api/tracks/translate' && req.method === 'POST') return send(res, 200, await translateTrack(JSON.parse(await readBody(req)), req.headers['x-ai-key']));
     if (p === '/api/agent' && req.method === 'POST') {
-      const work = P ? WORK : null;
+      const src = P ? sources : null;
       const projectId = req.headers['x-project-id'];
       if (projectId && projectId !== P?.id) return fail(res, 409, '열린 프로젝트가 바뀌었습니다. 프로젝트를 다시 여세요.');
       const b = JSON.parse(await readBody(req));
-      return send(res, 200, await agentCall(b, req.headers['x-ai-key'], EDIT_TOOL, false, work));
+      return send(res, 200, await agentCall(b, req.headers['x-ai-key'], EDIT_TOOL, false, { sources: src }));
     }
     // ---- 설정 ----
     if (p === '/api/config' && req.method === 'GET') {

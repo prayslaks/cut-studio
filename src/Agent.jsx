@@ -32,9 +32,9 @@ const QUICK = [
   ['발음 점검', '모든 대사에서 TTS가 잘못 읽을 만한 영어·숫자·기호·약어를 찾아서 발음 사전 규칙이나 줄별 발음(tts)으로 고쳐줘.'],
   ['톤 통일', '전체 대사를 프로젝트 설명에 맞는 톤으로 통일하고, 과장되거나 사실 확인이 필요한 표현은 지적해줘.'],
 ];
-const REFERENCE_QUICK = [
-  ['자료 요약', '이 프로젝트의 참고 자료에서 현재 영상에 쓸 수 있는 핵심 사실과 확인할 점을 정리해줘. 근거로 삼은 자료 이름을 표시해줘.'],
-  ['자료로 대사 초안', '프로젝트 참고 자료와 현재 영상의 맥락으로 나레이션 초안을 제안해줘. 근거가 부족한 내용은 구분하고, 대사 추가는 검토 가능한 편집 제안으로 작성해줘.'],
+const SOURCE_QUICK = [
+  ['소스 요약', '선택한 프로젝트 소스에서 현재 영상에 쓸 수 있는 핵심 사실과 확인할 점을 정리해줘. 근거로 삼은 소스 번호와 제목을 표시해줘.'],
+  ['소스로 대사 초안', '선택한 프로젝트 소스와 현재 영상의 맥락으로 나레이션 초안을 제안해줘. 근거가 부족한 내용은 구분하고, 대사 추가는 검토 가능한 편집 제안으로 작성해줘.'],
 ];
 
 const ls = {
@@ -42,7 +42,7 @@ const ls = {
   set: (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} },
 };
 
-export default function Agent({ keys, ai, mode = 'lines', projectId, activeReferences, onOpenReferences,
+export default function Agent({ keys, ai, mode = 'lines', projectId, sourceUsage, sourceTotal = 0, onOpenSources,
   msgs, setMsgs, busy, setBusy, onOpenSettings, buildContext, captureFrame, applyOps, annotate, describeOp, say }) {
   const { provider, model } = ai;
   const [input, setInput] = useState('');
@@ -93,7 +93,8 @@ export default function Agent({ keys, ai, mode = 'lines', projectId, activeRefer
   };
   const dismiss = (mi, idx) => setMsgs((all) => all.map((x, i) => (i === mi ? { ...x, skipped: [...(x.skipped || []), idx] } : x)));
 
-  const quick = mode === 'lines' && activeReferences > 0 ? [...REFERENCE_QUICK, ...QUICK] : QUICK_BY_MODE[mode] || QUICK;
+  const activeSources = sourceUsage?.count || 0;
+  const quick = mode === 'lines' && activeSources > 0 ? [...SOURCE_QUICK, ...QUICK] : QUICK_BY_MODE[mode] || QUICK;
 
   return (
     <div className="agent">
@@ -104,7 +105,9 @@ export default function Agent({ keys, ai, mode = 'lines', projectId, activeRefer
         <button className="ghost" title="AI 설정" onClick={onOpenSettings}>⚙</button>
         <button className="ghost" title="대화 비우기" disabled={busy} onClick={() => setMsgs(() => [])}>↺</button>
       </div>
-      <button className="ghost agent-references" onClick={onOpenReferences}>프로젝트 자료 · AI 참고 {activeReferences}개</button>
+      <button className="ghost agent-sources" onClick={onOpenSources} title="AI에 함께 보내는 소스 컨텍스트 확인">
+        {activeSources ? `소스 ${activeSources}/${sourceTotal}개 첨부 · 텍스트 ${sourceUsage.text.toLocaleString()}자 · 이미지 ${sourceUsage.images}장` : sourceTotal ? `소스 ${sourceTotal}개 · 첨부 안 함` : '소스 없음 · 추가하면 AI가 근거로 사용'}
+      </button>
       <div className="agent-log">
         {!msgs.length && (
           <div className="agent-empty">

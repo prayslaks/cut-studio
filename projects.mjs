@@ -5,8 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { APP_NAME } from './shared/app.js';
+import { VIDEO_EXT } from './shared/sources.js';
 
-export const VIDEO_EXT = ['.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4v'];
+export { VIDEO_EXT };
 export const DEFAULT_PARENT = path.join(os.homedir(), 'Videos', APP_NAME);
 
 // 새 프로젝트의 project.json(script.json) 기본값
