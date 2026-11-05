@@ -1,8 +1,9 @@
 // 편집본 타임라인 <-> 원본 영상 시간 변환 (build.py와 동일 규칙)
-export function buildTimeline(segs = [], endCard = 4) {
+// 구간마다 원본 파일이 다를 수 있음: parts[i].file = 구간의 파일 또는 기본 원본(defaultFile) — shared/clips.js
+export function buildTimeline(segs = [], endCard = 4, defaultFile = '') {
   let t = 0;
-  const parts = segs.map(([s, e], i) => {
-    const g = { i, s, e, off: t, dur: e - s };
+  const parts = segs.map(([s, e, file], i) => {
+    const g = { i, s, e, off: t, dur: e - s, file: file || defaultFile };
     t += e - s;
     return g;
   });
@@ -10,12 +11,13 @@ export function buildTimeline(segs = [], endCard = 4) {
 }
 
 export function editToSrc(tl, t) {
-  for (const g of tl.parts) if (t < g.off + g.dur - 1e-6) return { src: g.s + Math.max(0, t - g.off), seg: g.i };
+  for (const g of tl.parts) if (t < g.off + g.dur - 1e-6) return { src: g.s + Math.max(0, t - g.off), seg: g.i, file: g.file };
   return null; // 엔딩 카드 구간
 }
 
-export function srcToEdit(tl, s) {
-  for (const g of tl.parts) if (s >= g.s - 0.05 && s < g.e) return g.off + Math.max(0, s - g.s);
+// file: 그 시각을 재생 중인 원본 파일 (같은 파일의 구간 중에서만 찾음)
+export function srcToEdit(tl, s, file) {
+  for (const g of tl.parts) if ((file == null || g.file === file) && s >= g.s - 0.05 && s < g.e) return g.off + Math.max(0, s - g.s);
   return null; // 잘려나간 구간
 }
 

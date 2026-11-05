@@ -1,11 +1,13 @@
 // 썸네일: 편집본 한 장면(배경) + 레이어(텍스트/박스/그라데이션) → 1280x720 PNG
 // 레이어는 shared/thumbLayers.js 모델. 렌더는 ffmpeg + libass (자막과 같은 fonts/ 폴더 사용)
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { resolveStyle } from './shared/layout.js';
 import { projectVars } from './shared/cards.js';
-import { srcPath } from './projects.mjs';
+import { segPath } from './projects.mjs';
+import { locateSeg, fitFilter } from './shared/clips.js';
 import { TW, TH, TEMPLATES, templateLayers, draftLabel } from './shared/thumbLayers.js';
 
 export { TEMPLATES };
@@ -88,31 +90,32 @@ export function createThumbs({ work, root, ffPath, fontsMap, defaultFont, projec
     const offs = []; let t = 0; for (const [s, e] of meta.segs) { offs.push(t); t += e - s; }
     return { offs, body: t };
   }
+  // 편집본 시각 → 그 장면의 원본 파일과 시각 (구간마다 촬영본이 다를 수 있음)
   function toSrc(meta, t) {
-    const { offs, body } = timeline(meta);
-    t = Math.max(0, Math.min(t, body - 0.05));
-    const i = offs.reduce((k, o, j) => (o <= t ? j : k), 0);
-    return meta.segs[i][0] + t - offs[i];
+    const { body } = timeline(meta);
+    const last = meta.segs[meta.segs.length - 1];
+    const loc = locateSeg(meta.segs, Math.max(0, Math.min(t, body - 0.05))) || { seg: last, t: last[1] - 0.05 };
+    return { file: segPath(meta, loc.seg, root), t: loc.t };
   }
   // 배경 필터 (확대·밝기 보정) — 편집기 배경과 최종 렌더가 공유
   const bgFilter = (d, w = TW, h = TH) => {
     const z = Math.max(1, Math.min(2.5, d.zoom || 1)); const fx = Math.max(0, Math.min(1, d.fx ?? 0.5)), fy = Math.max(0, Math.min(1, d.fy ?? 0.5));
     const crop = z > 1.001 ? `crop=iw/${z}:ih/${z}:(iw-iw/${z})*${fx}:(ih-ih/${z})*${fy},` : '';
     const g = d.grade || {};
-    return `${crop}scale=${w}:${h}:flags=lanczos,setsar=1,eq=contrast=${g.contrast ?? 1.06}:saturation=${g.saturation ?? 1.12}:brightness=${g.brightness ?? 0}`;
+    return `${crop}${fitFilter(w, h, 'lanczos')},eq=contrast=${g.contrast ?? 1.06}:saturation=${g.saturation ?? 1.12}:brightness=${g.brightness ?? 0}`;
   };
 
   async function sample(key, n = 16, width = 640) {
     const s = await script(); const meta = s.meta[key]; const { body } = timeline(meta);
-    const src = srcPath(meta, root);
     await fsp.mkdir(path.join(DIR, 'cand'), { recursive: true });
     const lo = Math.min(8, body * 0.05), hi = body - 2;
     const out = [];
     await Promise.all(Array.from({ length: n }, async (_, i) => {
       const t = +(lo + ((hi - lo) * (i + 0.5)) / n).toFixed(1);
       const file = path.join(DIR, 'cand', `${key}_${i}.jpg`);
-      const r = await run(ffPath(), ['-y', '-hide_banner', '-loglevel', 'error', '-ss', toSrc(meta, t).toFixed(3), '-i', src, '-frames:v', '1',
-        '-vf', `scale=${width}:-2`, '-q:v', '4', file]);
+      const at = toSrc(meta, t);
+      const r = await run(ffPath(), ['-y', '-hide_banner', '-loglevel', 'error', '-ss', at.t.toFixed(3), '-i', at.file, '-frames:v', '1',
+        '-vf', fitFilter(width, Math.round((width * 9) / 16 / 2) * 2), '-q:v', '4', file]);
       if (r.code === 0) out.push({ i, t, file });
     }));
     return out.sort((a, b) => a.i - b.i);
@@ -123,10 +126,13 @@ export function createThumbs({ work, root, ffPath, fontsMap, defaultFont, projec
     const s = await script(); const meta = s.meta[key]; const { body } = timeline(meta);
     t = Math.max(0, Math.min(body - 0.02, t));
     const dir = path.join(DIR, 'still'); await fsp.mkdir(dir, { recursive: true });
-    const out = path.join(dir, `${key}_${Math.round(t * 1000)}_${w}.jpg`);
+    // 캐시 키 = 실제 원본 파일 + 원본 시각 (구간을 바꿔도 예전 장면이 남지 않게)
+    const at = toSrc(meta, t);
+    const fileKey = createHash('sha1').update(at.file).digest('hex').slice(0, 10);
+    const out = path.join(dir, `${key}_${fileKey}_${Math.round(at.t * 1000)}_${w}.jpg`);
     try { return await fsp.readFile(out); } catch {}
-    const r = await run(ffPath(), ['-y', '-hide_banner', '-loglevel', 'error', '-ss', toSrc(meta, t).toFixed(3), '-i', srcPath(meta, root),
-      '-frames:v', '1', '-vf', `scale=${w}:-2`, '-q:v', '5', out]);
+    const r = await run(ffPath(), ['-y', '-hide_banner', '-loglevel', 'error', '-ss', at.t.toFixed(3), '-i', at.file,
+      '-frames:v', '1', '-vf', fitFilter(w, Math.round((w * 9) / 16 / 2) * 2), '-q:v', '5', out]);
     if (r.code !== 0) throw new Error(r.err.trim().split('\n').slice(-2).join('\n') || '프레임 추출 실패');
     return fsp.readFile(out);
   }
@@ -136,7 +142,8 @@ export function createThumbs({ work, root, ffPath, fontsMap, defaultFont, projec
     const s = await script(); const meta = s.meta[q.key];
     await fsp.mkdir(path.join(DIR, 'bg'), { recursive: true });
     const out = path.join(DIR, 'bg', `${q.key}.jpg`);
-    const r = await run(ffPath(), ['-y', '-hide_banner', '-loglevel', 'error', '-ss', toSrc(meta, +q.t || 0).toFixed(3), '-i', srcPath(meta, root),
+    const at = toSrc(meta, +q.t || 0);
+    const r = await run(ffPath(), ['-y', '-hide_banner', '-loglevel', 'error', '-ss', at.t.toFixed(3), '-i', at.file,
       '-frames:v', '1', '-vf', bgFilter(q), '-q:v', '3', out]);
     if (r.code !== 0) throw new Error(r.err.trim().split('\n').slice(-2).join('\n') || '배경 추출 실패');
     return fsp.readFile(out);
@@ -148,7 +155,8 @@ export function createThumbs({ work, root, ffPath, fontsMap, defaultFont, projec
     const assName = `thumb_${d.id}.ass`;
     await fsp.writeFile(path.join(DIR, assName), layersAss(d, await fontsMap(), defaultFont()), 'utf8');
     const out = path.join(DIR, `${d.id}.png`);
-    const r = await run(ffPath(), ['-y', '-hide_banner', '-loglevel', 'error', '-ss', toSrc(meta, d.t).toFixed(3), '-i', srcPath(meta, root),
+    const at = toSrc(meta, d.t);
+    const r = await run(ffPath(), ['-y', '-hide_banner', '-loglevel', 'error', '-ss', at.t.toFixed(3), '-i', at.file,
       '-frames:v', '1', '-vf', `${bgFilter(d)},subtitles=filename=${assName}:fontsdir=../fonts`, out], { cwd: DIR });
     if (r.code !== 0) throw new Error(r.err.trim().split('\n').slice(-3).join('\n') || '썸네일 렌더 실패');
     return { ...d, png: `${d.id}.png`, rendered: Date.now() };

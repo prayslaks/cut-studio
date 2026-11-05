@@ -12,7 +12,7 @@ import { exec, spawn } from 'node:child_process';
 import { checkFfmpeg, startExport, getJob, cancelJob, renderFrame, ENCODERS } from './export.mjs';
 import { createFonts } from './fonts.mjs';
 import { createThumbs, TEMPLATES, THUMB_TOOL } from './thumbs.mjs';
-import { createRegistry, createProjectDir, listDir, probe, upgradeScript, DEFAULT_PARENT, srcPath, VIDEO_EXT } from './projects.mjs';
+import { createRegistry, createProjectDir, listDir, probe, upgradeScript, DEFAULT_PARENT, srcPath, clipPaths, VIDEO_EXT } from './projects.mjs';
 import os from 'node:os';
 import { MAIN, trackList, trackLines, exportCombos } from './shared/tracks.js';
 import { APP_NAME } from './shared/app.js';
@@ -45,8 +45,8 @@ function openProject(entry) {
   fs.mkdirSync(projectFonts.DIR, { recursive: true }); fs.mkdirSync(projectTts, { recursive: true });
   const projectThumbs = createThumbs({ work: dir, root: dir, ffPath: () => ffPath(), fontsMap: () => projectFonts.fontsMap(), defaultFont: () => defaultFont(),
     project: () => { try { return JSON.parse(fs.readFileSync(file, 'utf8')).project || {}; } catch { return {}; } } });
-  // 소스 영상 파일이 편집 영상(meta.src)으로 쓰이는 중인지 — 소스를 지워도 영상 파일은 남김
-  const inUse = async (f) => { try { const sc = JSON.parse(await fsp.readFile(file, 'utf8')); return Object.values(sc.meta || {}).some((m) => srcPath(m, dir) === f); } catch { return false; } };
+  // 소스 영상 파일이 편집 영상의 구간 원본으로 쓰이는 중인지 — 소스를 지워도 영상 파일은 남김
+  const inUse = async (f) => { try { const sc = JSON.parse(await fsp.readFile(file, 'utf8')); return Object.values(sc.meta || {}).some((m) => clipPaths(m, dir).includes(f)); } catch { return false; } };
   const projectSources = createSources({ work: dir, ff: () => ffPath(), probe: (f) => probe(ffprobePath(), f), inUse });
   WORK = dir; SCRIPT = file; TTS_DIR = projectTts; fonts = projectFonts; thumbs = projectThumbs; sources = projectSources;
   P = { ...entry, name: s.project?.name || entry.name, dir };
@@ -97,6 +97,7 @@ const readBody = (req, limit = Infinity) => new Promise((ok, no) => {
   req.on('end', () => ok(Buffer.concat(c).toString('utf8')));
   req.on('error', no);
 });
+const videoType = (f) => ({ '.webm': 'video/webm', '.mov': 'video/quicktime' }[path.extname(f).toLowerCase()] || 'video/mp4');
 const safeId = (id) => /^[A-Za-z0-9_-]{1,32}$/.test(id);
 
 async function loadScript() { need(); return JSON.parse(await fsp.readFile(SCRIPT, 'utf8')); }
@@ -586,7 +587,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/open' && req.method === 'POST') {
       const b = JSON.parse(await readBody(req));
       const target = path.resolve(String(b.path || ''));
-      const vids = P ? Object.values((await loadScript()).meta || {}).map((m) => path.dirname(srcPath(m, WORK) || '')).filter(Boolean) : [];
+      const vids = P ? Object.values((await loadScript()).meta || {}).flatMap((m) => clipPaths(m, WORK).map((f) => path.dirname(f))) : [];
       const allowed = [outDir(), WORK, ...vids].some((d) => target === d || target.startsWith(d + path.sep));
       if (!allowed || !fs.existsSync(target)) return fail(res, 400, '열 수 없는 경로');
       const isDir = fs.statSync(target).isDirectory();
@@ -598,14 +599,13 @@ const server = http.createServer(async (req, res) => {
     if (m) {
       const s = await loadScript();
       const f = srcPath(s.meta?.[m[1]], WORK); if (!f) return fail(res, 404, '영상 경로 없음');
-      const ext = path.extname(f).toLowerCase();
-      return streamFile(req, res, f, ext === '.webm' ? 'video/webm' : ext === '.mov' ? 'video/quicktime' : 'video/mp4');
+      return streamFile(req, res, f, videoType(f));
     }
-    // 원본 파일 직접 미리보기 (영상 추가 시)
+    // 원본 파일 직접 미리보기 (영상 추가 시, 기본 원본이 아닌 구간의 촬영본)
     if (p === '/api/rawvideo') {
       const f = url.searchParams.get('path') || '';
       if (!path.isAbsolute(f) || !VIDEO_EXT.includes(path.extname(f).toLowerCase())) return fail(res, 400, 'bad path');
-      return streamFile(req, res, f, 'video/mp4');
+      return streamFile(req, res, f, videoType(f));
     }
     if (p.startsWith('/api/')) return fail(res, 404, 'not found');
 

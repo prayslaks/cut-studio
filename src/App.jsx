@@ -26,6 +26,7 @@ import CardInspector from './cards/CardInspector.jsx';
 import CardEditOverlay from './cards/CardEditOverlay.jsx';
 import { cardInstances, cardFocusTime, newCardText, newCardRect, newCardGrad } from '../shared/cards.js';
 import { MAIN, trackOf, trackList, trackCfg, patchTrackCfg, nextLineId, exportCombos, applyDict } from '../shared/tracks.js';
+import { clipFiles as filesOf, baseName } from '../shared/clips.js';
 import { createVoiceProfile, migrateVoiceProfiles, resolveVoiceProfile, modelCaps, toneOf, withTone } from '../shared/voices.js';
 import TrackModal from './TrackModal.jsx';
 import VoicePanel from './VoicePanel.jsx';
@@ -106,9 +107,15 @@ export default function App({ project, onProjectChange }) {
   const [side, setSide] = useState(() => { const v = ls.get('zk.side', 'lines'); return ['lines', 'voice', 'style', 'cards', 'thumbs', 'youtube'].includes(v) ? v : 'lines'; });
   const [voiceProfileSel, setVoiceProfileSel] = useState('');
 
-  const videoRef = useRef(null);
+  // 촬영본(원본 파일)마다 <video> 하나. 구간이 바뀌면 보이는 영상을 바꿔 끼운다. videoRef = 지금 보이는 영상
+  const videoEls = useRef({});
+  const activeFile = useRef('');
+  const [shownFile, setShownFile] = useState('');
+  const videoRef = useMemo(() => ({ get current() { return videoEls.current[activeFile.current] || null; } }), []);
+  const showFile = useCallback((f) => { if (activeFile.current !== f) { activeFile.current = f; setShownFile(f); } }, []);
+  const stageRef = useRef(null);
   const [scriptReady, setScriptReady] = useState(false);
-  const frameRect = useFrameRect(videoRef, scriptReady);
+  const frameRect = useFrameRect(stageRef, !!(scriptReady && script?.videos?.length));
   const [font, setFont] = useState('Malgun Gothic');
   const [shot, setShot] = useState(null); // ffmpeg 실제 렌더 프레임
   const [compare, setCompare] = useState(false); // 썸네일: 실제 렌더 겹쳐 보기
@@ -117,7 +124,6 @@ export default function App({ project, onProjectChange }) {
   useEffect(() => { ls.set('zk.layout', JSON.stringify(lay)); }, [lay]);
   const setL = (k, v) => setLay((x) => ({ ...x, [k]: v }));
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-  const stageRef = useRef(null);
   const canvasWrapRef = useRef(null);
   const timelineTracksRef = useRef(null);
   const [ai, setAi] = useState(() => {
@@ -269,7 +275,9 @@ export default function App({ project, onProjectChange }) {
     return resolveStyle(script?.style || {}, map, font);
   }, [script?.style, fontsList, font]);
   const meta = script?.meta?.[tab];
-  const tl = useMemo(() => buildTimeline(meta?.segs, meta?.end_card ?? 4), [meta]);
+  const tl = useMemo(() => buildTimeline(meta?.segs, meta?.end_card ?? 4, meta?.src), [meta]);
+  const clipFiles = useMemo(() => [...new Set(tl.parts.map((p) => p.file).filter(Boolean))], [tl]);
+  activeFile.current = clipFiles.includes(shownFile) ? shownFile : clipFiles[0] || '';
   bodyRef.current = tl.body;
   // 나레이션 트랙: 편집 중인 트랙의 대사만 목록·타임라인·미리보기에 쓰고, 보이스·발음 사전도 그 트랙 것
   const tracks = trackList(script);
@@ -584,7 +592,7 @@ export default function App({ project, onProjectChange }) {
 
   const stop = useCallback(() => {
     cancelAnimationFrame(raf.current); play.current = null; setPlaying(false);
-    videoRef.current?.pause(); stopAudios();
+    Object.values(videoEls.current).forEach((v) => v.pause()); stopAudios();
   }, []);
 
   const startLine = (l, offset) => {
@@ -594,13 +602,14 @@ export default function App({ project, onProjectChange }) {
 
   const startPlay = (from, stopAt = null) => {
     stop(); setShot(null);
-    const v = videoRef.current; if (!v) return;
     const { lines: L, tl: T, durOf: D } = latest.current;
     from = Math.max(0, Math.min(from, T.total - 0.05));
-    const st = { idx: null, endStart: null, started: new Set(), stopAt };
+    const st = { idx: null, endStart: null, started: new Set(), stopAt, primed: false };
     const loc = editToSrc(T, from);
-    if (loc) { st.idx = loc.seg; v.currentTime = loc.src; v.play().catch(() => {}); }
-    else { st.endStart = performance.now() - (from - T.body) * 1000; v.pause(); }
+    if (loc) {
+      const v = videoEls.current[loc.file]; if (!v) return;
+      st.idx = loc.seg; showFile(loc.file); v.currentTime = loc.src; v.play().catch(() => {});
+    } else st.endStart = performance.now() - (from - T.body) * 1000;
     L.forEach((l) => {
       if (l.start <= from) { st.started.add(l.id); if (from < l.start + D(l)) startLine(l, from - l.start); }
     });
@@ -610,15 +619,27 @@ export default function App({ project, onProjectChange }) {
       const s = play.current; if (!s) return;
       const { lines: L2, tl: T2, gameVol: gv } = latest.current;
       if (s.idx != null) {
-        const g = T2.parts[s.idx];
+        const g = T2.parts[s.idx]; const v = videoEls.current[g.file];
+        if (!v) { stop(); return; }
+        // 다음 구간이 다른 촬영본이면 미리 그 위치로 옮겨 두어 전환 끊김을 줄인다
+        const nx = T2.parts[s.idx + 1];
+        if (nx && nx.file !== g.file && !s.primed && g.e - v.currentTime < 1.5) {
+          const nv = videoEls.current[nx.file]; if (nv) { nv.currentTime = nx.s; s.primed = true; }
+        }
         if (v.currentTime >= g.e - 0.03 || v.ended) {
-          s.idx++;
-          if (s.idx < T2.parts.length) v.currentTime = T2.parts[s.idx].s;
-          else { s.idx = null; v.pause(); s.endStart = performance.now(); }
+          s.idx++; s.primed = false;
+          const n = T2.parts[s.idx];
+          if (n) {
+            const nv = videoEls.current[n.file];
+            if (nv !== v) { v.pause(); showFile(n.file); }
+            if (nv) { if (Math.abs(nv.currentTime - n.s) > 0.05) nv.currentTime = n.s; nv.play().catch(() => {}); }
+          } else { s.idx = null; v.pause(); s.endStart = performance.now(); }
         }
       }
-      const edit = s.idx != null
-        ? T2.parts[s.idx].off + Math.max(0, v.currentTime - T2.parts[s.idx].s)
+      const cur = s.idx != null ? T2.parts[s.idx] : null;
+      const cv = cur ? videoEls.current[cur.file] : null;
+      const edit = cur
+        ? cur.off + Math.max(0, (cv?.currentTime ?? cur.s) - cur.s)
         : T2.body + (performance.now() - s.endStart) / 1000;
       if (edit >= T2.total || (s.stopAt != null && edit >= s.stopAt)) { setEditTime(Math.min(edit, T2.total)); stop(); return; }
       L2.forEach((l) => { if (!s.started.has(l.id) && l.start <= edit) { s.started.add(l.id); startLine(l, edit - l.start); } });
@@ -626,7 +647,7 @@ export default function App({ project, onProjectChange }) {
       // 엔딩 직전 원본 소리 페이드아웃 (내보내기 설정과 동일)
       let ef = 3; try { ef = +JSON.parse(localStorage.getItem('zk.export') || '{}').endFade || 3; } catch {}
       const fadeK = Math.max(0, Math.min(1, (T2.body - edit) / ef));
-      v.volume = Math.min(1, (speaking ? gv * 0.3 : gv) * fadeK);
+      if (cv) cv.volume = Math.min(1, (speaking ? gv * 0.3 : gv) * fadeK);
       if (Math.abs(edit - lastSet) > 0.04) { lastSet = edit; setEditTime(edit); }
       raf.current = requestAnimationFrame(loop);
     };
@@ -651,16 +672,17 @@ export default function App({ project, onProjectChange }) {
     if (play.current) return startPlay(t, play.current.stopAt);
     setEditTime(t);
     const loc = editToSrc(tl, t);
-    if (loc && videoRef.current) videoRef.current.currentTime = loc.src;
+    if (loc) { showFile(loc.file); const v = videoEls.current[loc.file]; if (v) v.currentTime = loc.src; }
   };
 
-  const onVideoTime = () => {
-    if (play.current || !videoRef.current) return;
-    const e = srcToEdit(tl, videoRef.current.currentTime);
+  // 보이는 촬영본의 위치가 바뀌면(정지 상태) 편집본 시각을 맞춤. 미리 옮겨 둔 다른 촬영본은 무시
+  const onVideoTime = (file, el) => {
+    if (play.current || file !== activeFile.current) return;
+    const e = srcToEdit(tl, el.currentTime, file);
     if (e != null) setEditTime(e);
   };
 
-  useEffect(() => { stop(); setEditTime(0); setSel(null); }, [tab, stop]);
+  useEffect(() => { stop(); setEditTime(0); setSel(null); setShownFile(''); }, [tab, stop]);
 
   const focusCard = (inst) => { stop(); setShot(null); if (inst.kind === 'chapter') C.setChIdx(inst.idx); seek(cardFocusTime(inst)); };
   const playCard = (inst) => { setShot(null); startPlay(Math.max(0, inst.a - 0.5), Math.min(tl.total, inst.b + 0.3)); };
@@ -811,6 +833,7 @@ export default function App({ project, onProjectChange }) {
       '- anim: {delay(초), dx, dy(등장 시작 위치 오프셋 px), dur(이동 시간), fade(bool)}. 텍스트 변수: 챕터 {num} {kr} {en}, 공통 {date} {title}.',
       '- op=card {card, props:{enabled,start,dur,firstOffset,offset,fadeIn,fadeOut}}, op=card_layer {card, layer, props}, op=card_add {card, props:{type,...}}, op=card_remove {card, layer}. 레이어 전체 교체는 card_remove 여러 개 + card_add 여러 개로.',
       `- 영상 정보(${tab}): ${JSON.stringify({ title: meta?.title, date: meta?.date, chapters: meta?.chapters, end_card: meta?.end_card })}`,
+      `- 편집 구성(${tab}, 위에서부터 이어 붙임): ${JSON.stringify(tl.parts.map((p) => ({ seg: p.i + 1, clip: baseName(p.file), src_start: p.s, src_end: p.e, edit_start: +p.off.toFixed(1) })))}`,
       `- 카드 정의(${tab}): ${JSON.stringify(C.cards)}`,
       '- 사용자는 카드 탭의 "썸네일에서 가져오기"로 썸네일 레이어를 그대로 옮길 수도 있다(필요하면 안내).',
     ];
@@ -945,7 +968,8 @@ export default function App({ project, onProjectChange }) {
   };
   const projectModals = (<>
     {vmodal && <VideoModal vkey={vmodal.key} meta={vmodal.key ? script.meta[vmodal.key] : null} isNew={!!vmodal.isNew} say={say}
-      initialSrc={vmodal.src} initialTitle={vmodal.title}
+      initialSrc={vmodal.src} initialTitle={vmodal.title} appendSrc={vmodal.append}
+      sources={(S.items || []).filter((s) => s.kind === 'video')}
       onSave={(m) => saveVideo(m, vmodal.isNew ? null : vmodal.key)} onDelete={() => deleteVideo(vmodal.key)} onClose={() => setVmodal(null)} />}
     {phome && <ProjectHome initialView={phome} beforeOpen={prepareProjectChange} onOpened={onProjectChange} onClose={() => setPhome(null)} />}
     {projectPrompt && <Modal title="프로젝트 변경사항 저장" onClose={() => finishProjectPrompt('cancel')}
@@ -962,12 +986,13 @@ export default function App({ project, onProjectChange }) {
     {modal === 'project' && <ProjectSettings project={script.project || {}} onChange={setProject} dirty={dirty} onSave={() => save()} onClose={() => setModal(null)} say={say} />}
   </>);
   // 소스 패널 (작업 화면 왼쪽 끝, 영상이 없을 때도 표시)
-  const usedPaths = new Set(Object.values(script.meta || {}).map((m) => m?.src).filter(Boolean));
+  const usedPaths = new Set(Object.values(script.meta || {}).flatMap((m) => filesOf(m)));
   const sourcesDock = (<>
     <SourcesPanel S={S} open={lay.srcOpen} onToggle={() => setL('srcOpen', !lay.srcOpen)} view={srcView} setView={setSrcView}
       dragging={dragging} pickRequest={srcPick} usedPaths={usedPaths} brief={script.project?.brief || ''}
       onEditProject={() => setModal('project')} say={say}
-      onUseAsVideo={(s) => setVmodal({ isNew: true, src: s.path, title: s.title })} />
+      onUseAsVideo={(s) => setVmodal({ isNew: true, src: s.path, title: s.title })}
+      appendTitle={script.videos?.includes(tab) && meta ? meta.title || tab : ''} onAppend={(s) => setVmodal({ key: tab, append: s.path })} />
     {lay.srcOpen && <Splitter axis="x" getStart={() => lay.src} onDrag={(d, v) => setL('src', clamp(v + d, 240, 720))} onReset={() => setL('src', DEFAULT_LAYOUT.src)} />}
   </>);
   const dropOverlay = dragging && !lay.srcOpen && <div className="drop-overlay" aria-hidden="true"><b>놓으면 소스로 추가합니다</b><small>영상 · 이미지 · 텍스트</small></div>;
@@ -1080,8 +1105,11 @@ export default function App({ project, onProjectChange }) {
           <div className={`videowork ${side === 'cards' ? 'has-inspector' : ''}`} hidden={side === 'thumbs'}>
           <div className="stagewrap">
           <div className="stage" ref={stageRef} style={lay.stageH ? { '--preview-height': `${lay.stageH}px` } : undefined}>
-            <video ref={videoRef} src={`/api/video/${tab}`} preload="metadata" onTimeUpdate={onVideoTime}
-              onClick={() => (playing ? stop() : startPlay(editTime))} />
+            {clipFiles.map((f) => (
+              <video key={f} ref={(el) => { if (el) videoEls.current[f] = el; else delete videoEls.current[f]; }}
+                className={f === activeFile.current ? 'on' : ''} src={/^([A-Za-z]:[\\/]|\/)/.test(f) ? `/api/rawvideo?path=${encodeURIComponent(f)}` : `/api/video/${tab}`}
+                preload="auto" onTimeUpdate={(e) => onVideoTime(f, e.currentTarget)} onClick={() => (playing ? stop() : startPlay(editTime))} />
+            ))}
             <FrameOverlay rect={frameRect} t={editTime} st={clientStyle} fontsReady={fontsVer} fontsList={fontsList} fallbackFont={font}
               lines={lines.map((l) => ({ start: l.start, dur: durOf(l), text: l.text }))}
               insts={insts} hide={editInst ? `${editInst.kind}:${editInst.idx}` : null} />
@@ -1278,7 +1306,7 @@ export default function App({ project, onProjectChange }) {
           <button className="ghost sm reset-layout" onClick={() => { setLay(DEFAULT_LAYOUT); setAsstOpen(false); }}>레이아웃 초기화</button>
         </div>
         <div id="timeline-tracks" ref={timelineTracksRef} hidden={!lay.timelineOpen}>
-          <Timeline tl={tl} lines={lines} trackName={tracks.length > 1 ? activeTrackName : null} durOf={durOf} statusOf={statusOf} warnings={warnings} playing={playing}
+          <Timeline tl={tl} multiClip={clipFiles.length > 1} lines={lines} trackName={tracks.length > 1 ? activeTrackName : null} durOf={durOf} statusOf={statusOf} warnings={warnings} playing={playing}
             editTime={editTime} sel={sel} onSeek={seek} onSel={(l, keep) => {
               setSel(l.id);
               if (!keep) {

@@ -153,3 +153,6 @@ export function probe(ffprobe, file) {
 
 // 영상 원본 경로: 절대경로면 그대로, 아니면 기준 폴더 + 파일명 (이전 형식 호환)
 export const srcPath = (meta, root) => (!meta?.src ? null : path.isAbsolute(meta.src) ? meta.src : path.join(root || '', path.basename(meta.src)));
+// 구간의 원본 파일 (구간에 파일이 없으면 영상의 기본 원본) — shared/clips.js
+export const segPath = (meta, seg, root) => (seg && seg[2]) || srcPath(meta, root);
+export const clipPaths = (meta, root) => [...new Set((meta?.segs || []).map((g) => segPath(meta, g, root)).filter(Boolean))];

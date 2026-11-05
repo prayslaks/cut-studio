@@ -4,7 +4,7 @@ import { MAX_SOURCE_TEXT, MAX_NOTE, MAX_FRAMES, FRAME_COUNTS, fmtTime, fmtBytes 
 const KIND = { text: '텍스트', image: '이미지', video: '영상' };
 
 // 소스 하나의 내용 확인·편집. 제목·메모·본문은 '변경 저장'으로 반영, 켜기/프레임은 즉시 반영
-export default function SourceDetail({ s, S, used, onBack, onUseAsVideo, say }) {
+export default function SourceDetail({ s, S, used, onBack, onUseAsVideo, appendTitle, onAppend, say }) {
   const [draft, setDraft] = useState({ title: s.title, note: s.note || '', text: s.text || '' });
   const [busy, setBusy] = useState('');
   const [playErr, setPlayErr] = useState(false);
@@ -94,9 +94,10 @@ export default function SourceDetail({ s, S, used, onBack, onUseAsVideo, say }) 
           ))}
           {!frames.length && <small className="muted">대표 장면이 없습니다. 영상 정보와 메모만 전달됩니다.</small>}
         </div>
-        <div className="row">
-          {used ? <small className="tag">편집 영상으로 사용 중</small>
-            : <button onClick={() => onUseAsVideo(s)} title="이 영상을 프로젝트의 편집 영상 탭으로 가져오기 (구간·챕터 설정)">편집 영상으로 추가</button>}
+        <div className="src-use">
+          {used && <small className="tag">편집 영상에 사용 중</small>}
+          <button className="sm" onClick={() => onUseAsVideo(s)} title="이 촬영본으로 새 편집 영상 탭을 만듭니다 (구간·챕터 설정)">새 편집 영상으로</button>
+          {appendTitle && <button className="sm" onClick={() => onAppend(s)} title="지금 편집 중인 영상의 끝에 이 촬영본을 구간으로 이어 붙입니다">‘{appendTitle}’에 이어 붙이기</button>}
         </div>
       </>)}
 

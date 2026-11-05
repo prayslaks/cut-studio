@@ -1,4 +1,5 @@
 // 완성본 MP4 내보내기: 트림 + 자막(ASS 번인) + TTS 덕킹 믹스를 ffmpeg 한 번으로 처리
+// 구간마다 원본 촬영본이 다를 수 있음(shared/clips.js) — 촬영본마다 입력 하나, 비율이 다르면 레터박스
 // (작업 폴더의 build.py와 같은 규칙. 자막 스타일 = 캔바 썸네일 톤)
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -7,7 +8,8 @@ import path from 'node:path';
 
 import { FRAME, SUB, resolveStyle, SUB_TAIL, wrapLines, highlightParts } from './shared/layout.js';
 import { resolveCards, cardInstances, cardAss } from './shared/cards.js';
-import { srcPath } from './projects.mjs';
+import { segPath } from './projects.mjs';
+import { locateSeg, fitFilter } from './shared/clips.js';
 import { MAIN, trackLines, trackCfg, applyDict } from './shared/tracks.js';
 
 const { W, H } = FRAME;
@@ -53,6 +55,12 @@ export async function checkFfmpeg(ff) {
   }));
   const f = await run(ff, ['-hide_banner', '-filters']);
   return { ok: true, version, ffprobe: probe.code === 0, libass: /\bsubtitles\b/.test(f.out), encoders: Object.keys(ENCODERS).filter((e) => encoders.includes(e)) };
+}
+
+// 오디오 스트림이 없는 촬영본(화면 녹화 등)은 무음으로 채운다
+async function hasAudio(ff, file) {
+  const r = await run(ffprobeOf(ff), ['-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=index', '-of', 'csv=p=0', file]);
+  return r.code === 0 && r.out.trim().length > 0;
 }
 
 async function probeDur(ff, file) {
@@ -185,12 +193,13 @@ export async function renderFrame(key, t, opts, env) {
   let inp;
   if (t >= P.body) inp = ['-f', 'lavfi', '-i', `color=c=0x080C0F:s=${W}x${H}:d=1`];
   else {
-    const i = P.offs.reduce((k, o, j) => (o <= t ? j : k), 0);
-    inp = ['-ss', (P.segs[i][0] + t - P.offs[i]).toFixed(3), '-i', srcPath(P.meta, root)];
+    const last = P.segs[P.segs.length - 1];
+    const loc = locateSeg(P.segs, t) || { seg: last, t: last[1] - 0.05 };
+    inp = ['-ss', loc.t.toFixed(3), '-i', segPath(P.meta, loc.seg, root)];
   }
   const out = path.join(work, `frame_${key}.jpg`);
   const r = await run(ff, ['-y', '-hide_banner', '-loglevel', 'error', ...inp, '-frames:v', '1', '-vf',
-    `scale=${W}:${H},setsar=1,setpts=PTS-STARTPTS+${t.toFixed(3)}/TB,subtitles=filename=${P.assName}:fontsdir=fonts,scale=${opts.width || 1600}:-2`,
+    `${fitFilter(W, H)},setpts=PTS-STARTPTS+${t.toFixed(3)}/TB,subtitles=filename=${P.assName}:fontsdir=fonts,scale=${opts.width || 1600}:-2`,
     '-q:v', '3', out], { cwd: work });
   if (r.code !== 0) throw new Error(r.err.trim().split('\n').slice(-4).join('\n') || 'ffmpeg 실패');
   return out;
@@ -216,15 +225,19 @@ async function exportOne(it, opts, env, job) {
   }
 
   // 필터 그래프 (오디오만 내보내기: 영상 없이 같은 길이의 최종 믹스 — 유튜브 다국어 오디오 트랙용)
-  const src = srcPath(meta, root);
-  const inputs = ['-i', src]; const fc = []; const n = segs.length;
+  const files = [...new Set(segs.map((g) => segPath(meta, g, root)))];
+  const audio = await Promise.all(files.map((f) => hasAudio(ff, f)));
+  const inputs = files.flatMap((f) => ['-i', f]); const fc = []; const n = segs.length;
   // 마지막 구간: 엔딩 카드로 넘어가기 전에 게임 소리를 길게 페이드아웃 (소스가 끝나며 뚝 끊기지 않도록)
   const endFade = Math.max(FADE, Math.min(+(opts.endFade ?? 3), 10));
-  segs.forEach(([s, e], i) => {
-    const d = e - s;
+  segs.forEach((g, i) => {
+    const [s, e] = g; const d = e - s;
+    const fi = files.indexOf(segPath(meta, g, root));
     const af = i === n - 1 ? Math.min(endFade, d) : FADE;
-    if (!audioOnly) fc.push(`[0:v]trim=${s}:${e},setpts=PTS-STARTPTS,fps=30000/1001,scale=${W}:${H},setsar=1,fade=in:st=0:d=${FADE},fade=out:st=${(d - FADE).toFixed(3)}:d=${FADE}[v${i}]`);
-    fc.push(`[0:a]atrim=${s}:${e},asetpts=PTS-STARTPTS,aformat=sample_rates=48000:channel_layouts=stereo,afade=in:st=0:d=${FADE},afade=out:st=${(d - af).toFixed(3)}:d=${af.toFixed(3)}[a${i}]`);
+    if (!audioOnly) fc.push(`[${fi}:v]trim=${s}:${e},setpts=PTS-STARTPTS,fps=30000/1001,${fitFilter(W, H)},format=yuv420p,fade=in:st=0:d=${FADE},fade=out:st=${(d - FADE).toFixed(3)}:d=${FADE}[v${i}]`);
+    fc.push(audio[fi]
+      ? `[${fi}:a]atrim=${s}:${e},asetpts=PTS-STARTPTS,aformat=sample_rates=48000:channel_layouts=stereo,afade=in:st=0:d=${FADE},afade=out:st=${(d - af).toFixed(3)}:d=${af.toFixed(3)}[a${i}]`
+      : `anullsrc=r=48000:cl=stereo,atrim=0:${d.toFixed(3)},asetpts=PTS-STARTPTS[a${i}]`);
   });
   if (!audioOnly) fc.push(`color=c=0x080C0F:s=${W}x${H}:r=30000/1001:d=${endDur},format=yuv420p,setsar=1[v${n}]`);
   fc.push(`anullsrc=r=48000:cl=stereo,atrim=0:${endDur}[a${n}]`);
@@ -238,7 +251,7 @@ async function exportOne(it, opts, env, job) {
   if (voice.length) {
     voice.forEach((l, k) => {
       inputs.push('-i', l.mp3); const ms = Math.round(l.start * 1000);
-      fc.push(`[${k + 1}:a]aformat=sample_rates=48000:channel_layouts=stereo,adelay=${ms}|${ms},volume=${(opts.ttsVolume ?? 1.6).toFixed(2)}[t${k}]`);
+      fc.push(`[${files.length + k}:a]aformat=sample_rates=48000:channel_layouts=stereo,adelay=${ms}|${ms},volume=${(opts.ttsVolume ?? 1.6).toFixed(2)}[t${k}]`);
     });
     // apad: 마지막 대사가 영상보다 먼저 끝나도 사이드체인 입력이 끊기지 않게 (끊기면 sidechaincompress가 멈춰 인코딩이 멈춤, 길이는 -t로 자름)
     fc.push(voice.map((_, k) => `[t${k}]`).join('') + `amix=inputs=${voice.length}:normalize=0:duration=longest,apad,asplit=2[tts1][tts2]`);

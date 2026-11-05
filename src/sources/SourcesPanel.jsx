@@ -79,7 +79,7 @@ function LinkVideos({ onLink, onClose, jobs }) {
 }
 
 // NotebookLM식 소스 패널: 여러 자료를 한 번에 올리고, 내용과 AI에 실제로 가는 컨텍스트를 확인·제어
-export default function SourcesPanel({ S, open, onToggle, view, setView, dragging, pickRequest, usedPaths, brief, onEditProject, onUseAsVideo, say }) {
+export default function SourcesPanel({ S, open, onToggle, view, setView, dragging, pickRequest, usedPaths, brief, onEditProject, onUseAsVideo, appendTitle, onAppend, say }) {
   const inputRef = useRef(null);
   const [draft, setDraft] = useState(false);
   const [linking, setLinking] = useState(false);
@@ -126,7 +126,7 @@ export default function SourcesPanel({ S, open, onToggle, view, setView, draggin
         {view === 'context' ? (
           <ContextPreview S={S} brief={brief} onEditProject={onEditProject} onOpen={(id) => setView(`src:${id}`)} />
         ) : detail ? (
-          <SourceDetail key={detail.id} s={detail} S={S} used={usedPaths.has(detail.path)} onBack={() => setView('list')} onUseAsVideo={onUseAsVideo} say={say} />
+          <SourceDetail key={detail.id} s={detail} S={S} used={usedPaths.has(detail.path)} onBack={() => setView('list')} onUseAsVideo={onUseAsVideo} appendTitle={appendTitle} onAppend={onAppend} say={say} />
         ) : (<>
           <div className={`src-drop ${dragging ? 'over' : ''}`}>
             <b>{dragging ? '여기에 놓으면 소스로 추가합니다' : '파일을 끌어다 놓거나 붙여넣기(Ctrl+V)'}</b>

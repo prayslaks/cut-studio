@@ -12,7 +12,7 @@ const rulerTime = (t, step) => {
 
 // 멀티 트랙 타임라인: 눈금 / 영상 구간 / 카드 / 나레이션(자막·음성) / 썸네일 장면
 // - 빈 곳 클릭·드래그: 재생 위치 이동, 대사·카드 블록 드래그: 시작 시각 이동, Ctrl+휠: 확대
-export default function Timeline({ tl, lines, trackName, durOf, statusOf, warnings, editTime, sel, playing, onSeek, onSel, onMove, onDragStart, onDrop,
+export default function Timeline({ tl, multiClip = false, lines, trackName, durOf, statusOf, warnings, editTime, sel, playing, onSeek, onSel, onMove, onDragStart, onDrop,
   chapters = [], insts = [], thumbs = [], onCardClick, onCardMove, onCardDragStart, onThumbClick }) {
   const scRef = useRef(null);
   const wrapRef = useRef(null);
@@ -150,7 +150,9 @@ export default function Timeline({ tl, lines, trackName, durOf, statusOf, warnin
           <div className="trk r-video">
             {tl.parts.map((g) => {
               const c = chapters[g.i]; const name = c && (c.kr || c.en) ? `${c.num ? `${c.num} ` : ''}${c.kr || c.en}` : `구간 ${g.i + 1}`;
-              return <div key={g.i} className="clip" style={{ left: px(g.off), width: Math.max(2, px(g.dur) - 1) }} title={`${name} · 원본 ${fmt(g.s)}–${fmt(g.e)} · 편집본 ${fmt(g.off)}부터`}>{name}</div>;
+              const file = String(g.file || '').split(/[\\/]/).pop();
+              return <div key={g.i} className="clip" style={{ left: px(g.off), width: Math.max(2, px(g.dur) - 1) }}
+                title={`${name} · ${file} ${fmt(g.s)}–${fmt(g.e)} · 편집본 ${fmt(g.off)}부터`}>{name}{multiClip && <small> · {file}</small>}</div>;
             })}
             <div className="clip end" style={{ left: px(tl.body), width: px(tl.total - tl.body) }} title="엔딩 카드 구간">엔딩</div>
           </div>

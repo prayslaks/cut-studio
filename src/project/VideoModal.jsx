@@ -2,52 +2,132 @@ import { useEffect, useRef, useState } from 'react';
 import { Modal } from '../Modals.jsx';
 import FileBrowser from './FileBrowser.jsx';
 import { fmt } from '../timeline.js';
+import { baseName, packSegs } from '../../shared/clips.js';
 
 const r1 = (v) => Math.round(v * 10) / 10;
 const fmtS = (t) => { t = Math.max(0, t || 0); const m = Math.floor(t / 60); return `${m}:${(t - m * 60).toFixed(1).padStart(4, '0')}`; };
+const rawUrl = (f) => `/api/rawvideo?path=${encodeURIComponent(f)}`;
+const pad2 = (n) => String(n).padStart(2, '0');
+const COLORS = ['#dcf884', '#7cc4ff', '#ffb066', '#c9b3d8', '#ff8fb1', '#7fe0c3', '#f2d16b', '#9aa6ff'];
 
-// 영상 추가·설정: 원본 파일, 제목·날짜, 사용할 구간(트림)과 구간별 챕터, 엔딩 문구
-// initialSrc: 소스 패널의 영상을 편집 영상으로 가져올 때 파일 선택 단계를 건너뜀
-export default function VideoModal({ vkey, meta, isNew, initialSrc, initialTitle, onSave, onDelete, onClose, say }) {
-  const [step, setStep] = useState(isNew && !initialSrc ? 'pick' : 'edit');
-  const [m, setM] = useState(() => ({ title: initialTitle || '', date: '', src: initialSrc || '', segs: [], chapters: [], end: ['', ''], end_card: 4, ...(meta || {}) }));
-  const [info, setInfo] = useState(null);
+// 촬영본 고르기: 프로젝트 소스의 영상 또는 PC 파일 (복사하지 않고 원래 위치 사용)
+function ClipPicker({ sources, used, onPick, onCancel }) {
+  const [tab, setTab] = useState(sources.length ? 'sources' : 'pc');
+  return (
+    <div className="clip-picker">
+      <div className="row">
+        <div className="seg-toggle sm" role="tablist" aria-label="촬영본 위치">
+          <button role="tab" aria-selected={tab === 'sources'} className={tab === 'sources' ? 'on' : ''} disabled={!sources.length} onClick={() => setTab('sources')}>소스 영상 <small>{sources.length}</small></button>
+          <button role="tab" aria-selected={tab === 'pc'} className={tab === 'pc' ? 'on' : ''} onClick={() => setTab('pc')}>PC에서 찾기</button>
+        </div>
+        <span className="grow" />
+        {onCancel && <button className="ghost sm" onClick={onCancel}>취소</button>}
+      </div>
+      {tab === 'sources' ? (
+        <ul className="clip-sources">
+          {sources.map((s) => (
+            <li key={s.id}>
+              <button onClick={() => onPick(s.path)} title={s.path}>
+                {s.frames?.length ? <img src={`/api/sources/${s.id}/frames/${Math.round(s.frames[0].t * 1000)}.jpg`} alt="" loading="lazy" /> : <span className="clip-noimg">▶</span>}
+                <span><b>{s.title}</b><small>{fmtS(s.duration)}{used.has(s.path) ? ' · 사용 중' : ''}</small></span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : <FileBrowser mode="video" height={300} onPick={onPick} />}
+      <p className="muted sm">고른 촬영본은 전체 길이 구간으로 끝에 추가됩니다. 파일은 복사하지 않고 그 위치를 그대로 씁니다.</p>
+    </div>
+  );
+}
+
+// 지금 플레이어에 띄운 촬영본에서 어느 부분을 쓰는지 (클릭으로 이동)
+function ClipMap({ rows, file, dur, cur, sel, color, onSeek }) {
+  if (!dur) return null;
+  return (
+    <div className="clipmap" title="이 촬영본에서 쓰는 구간 · 클릭해서 이동"
+      onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); onSeek(Math.max(0, Math.min(dur, ((e.clientX - r.left) / r.width) * dur))); }}>
+      {rows.map((r, i) => r.file === file && (
+        <span key={i} className={i === sel ? 'on' : ''} style={{ left: `${(r.s / dur) * 100}%`, width: `${Math.max(0.6, ((r.e - r.s) / dur) * 100)}%`, background: color }}>{i + 1}</span>
+      ))}
+      <i style={{ left: `${(cur / dur) * 100}%` }} />
+    </div>
+  );
+}
+
+// 편집 영상 설정: 구간(촬영본·사용할 부분·순서)과 구간별 챕터, 제목·날짜·엔딩 문구
+// initialSrc: 새 영상을 이 촬영본으로 시작 / appendSrc: 기존 영상 끝에 이 촬영본을 구간으로 추가
+export default function VideoModal({ vkey, meta, isNew, initialSrc, initialTitle, appendSrc, sources = [], onSave, onDelete, onClose, say }) {
+  const [m, setM] = useState(() => ({ title: initialTitle || '', date: '', end: ['', ''], end_card: 4, ...(meta || {}) }));
+  const [rows, setRows] = useState(() => (meta?.segs || []).map((g, i) => ({ s: g[0], e: g[1], file: g[2] || meta.src, chap: meta.chapters?.[i] || {} })));
+  const [infos, setInfos] = useState({});
+  const [curFile, setCurFile] = useState(() => meta?.segs?.[0]?.[2] || meta?.src || '');
+  const [sel, setSel] = useState(0);
+  const [picking, setPicking] = useState(isNew && !initialSrc);
   const [cur, setCur] = useState(0);
   const vref = useRef(null);
+  const pendingSeek = useRef(null);
+  const probing = useRef(new Set());
   const set = (p) => setM((x) => ({ ...x, ...p }));
 
-  useEffect(() => {
-    if (!m.src) return;
-    fetch(`/api/probe?path=${encodeURIComponent(m.src)}`).then((r) => r.json()).then((d) => setInfo(d)).catch(() => setInfo({ error: '정보를 읽지 못했습니다' }));
-  }, [m.src]);
+  const files = [...new Set(rows.map((r) => r.file))];
+  const colorOf = (f) => COLORS[Math.max(0, files.indexOf(f)) % COLORS.length];
 
-  const pick = async (file) => {
-    const r = await fetch(`/api/probe?path=${encodeURIComponent(file)}`); const d = await r.json();
-    if (!r.ok || d.error) { say?.(`영상 정보를 읽지 못했습니다: ${d.error || r.statusText}`, 'err'); }
-    const name = file.split(/[\\/]/).pop().replace(/\.[^.]+$/, '');
-    setM((x) => ({ ...x, src: file, title: x.title || name, segs: x.segs.length ? x.segs : d.duration ? [[0, r1(d.duration)]] : [] }));
-    setInfo(d); setStep('edit');
+  const probeFile = async (file) => {
+    if (infos[file] || probing.current.has(file)) return infos[file] || {};
+    probing.current.add(file);
+    let info;
+    try { const r = await fetch(`/api/probe?path=${encodeURIComponent(file)}`); const d = await r.json(); info = r.ok ? d : { error: d.error || r.statusText }; }
+    catch { info = { error: '정보를 읽지 못했습니다' }; }
+    setInfos((x) => ({ ...x, [file]: info }));
+    return info;
   };
-  useEffect(() => { if (isNew && initialSrc) pick(initialSrc); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { files.forEach((f) => { if (!infos[f]) probeFile(f); }); }, [files.join('\n')]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const dur = info?.duration || 0;
-  const segs = m.segs || [];
-  const chap = (i) => m.chapters?.[i] || {};
-  const setSeg = (i, k, v) => set({ segs: segs.map((s, j) => (j === i ? (k === 0 ? [r1(v), s[1]] : [s[0], r1(v)]) : s)) });
-  const setChap = (i, p) => { const c = [...(m.chapters || [])]; while (c.length <= i) c.push({ num: String(c.length + 1).padStart(2, '0'), kr: '', en: '' }); c[i] = { ...c[i], ...p }; set({ chapters: c }); };
-  const addSeg = () => { const a = r1(cur); set({ segs: [...segs, [a, r1(Math.min(dur || a + 10, a + 10))]].sort((x, y) => x[0] - y[0]) }); };
-  const delSeg = (i) => set({ segs: segs.filter((_, j) => j !== i), chapters: (m.chapters || []).filter((_, j) => j !== i) });
+  // 촬영본 추가 = 전체 길이 구간을 끝에 붙이고 그 촬영본을 플레이어에 띄움
+  const addFile = async (file, count = rows.length) => {
+    setPicking(false);
+    const info = await probeFile(file);
+    if (info.error) say?.(`영상 정보를 읽지 못했습니다: ${info.error}`, 'err');
+    setRows((rs) => [...rs, { s: 0, e: r1(info.duration || 10), file, chap: {} }]);
+    setSel(count); setCurFile(file); pendingSeek.current = 0;
+    setM((x) => ({ ...x, title: x.title || baseName(file).replace(/\.[^.]+$/, '') }));
+  };
+  useEffect(() => { const f = initialSrc || appendSrc; if (f) addFile(f); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   const seek = (t) => { if (vref.current) vref.current.currentTime = t; };
-  const total = segs.reduce((n, [a, b]) => n + Math.max(0, b - a), 0);
-  const problems = segs.map(([a, b], i) => (b <= a ? '끝이 시작보다 앞' : dur && b > dur + 0.05 ? '영상 길이 초과' : i > 0 && a < segs[i - 1][1] ? '앞 구간과 겹침' : ''));
-  const ok = m.src && m.title.trim() && segs.length && !problems.some(Boolean);
+  const selectRow = (i) => {
+    if (sel === i) return;
+    setSel(i);
+    const r = rows[i];
+    if (r.file !== curFile) { setCurFile(r.file); pendingSeek.current = r.s; } else seek(r.s);
+  };
+  const setRow = (i, p) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...p } : r)));
+  const setChap = (i, p) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, chap: { ...r.chap, ...p } } : r)));
+  const addSeg = () => {
+    const a = r1(cur); const d = infos[curFile]?.duration;
+    const at = rows.length ? sel + 1 : 0;
+    setRows((rs) => [...rs.slice(0, at), { s: a, e: r1(Math.min(d || a + 10, a + 10)), file: curFile, chap: {} }, ...rs.slice(at)]);
+    setSel(at);
+  };
+  const move = (i, d) => {
+    const j = i + d; if (j < 0 || j >= rows.length) return;
+    setRows((rs) => { const n = [...rs]; [n[i], n[j]] = [n[j], n[i]]; return n; });
+    setSel(j);
+  };
+  const del = (i) => { setRows((rs) => rs.filter((_, j) => j !== i)); setSel((s) => Math.max(0, Math.min(s > i ? s - 1 : s, rows.length - 2))); };
+
+  const total = rows.reduce((n, r) => n + Math.max(0, r.e - r.s), 0);
+  const problems = rows.map((r) => { const d = infos[r.file]?.duration; return r.e <= r.s ? '끝이 시작보다 앞' : d && r.e > d + 0.05 ? '촬영본 길이 초과' : ''; });
+  const ok = rows.length && m.title.trim() && !problems.some(Boolean);
+  const info = infos[curFile];
+  const used = new Set(files);
 
   const save = () => {
-    const chapters = (m.chapters || []).slice(0, segs.length).map((c, i) => ({ num: c.num || String(i + 1).padStart(2, '0'), kr: c.kr || '', en: c.en || '' }));
-    onSave({ ...m, title: m.title.trim(), chapters: chapters.some((c) => c.kr.trim() || c.en.trim()) ? chapters : [] });
+    const chapters = rows.map((r, i) => ({ ...r.chap, num: r.chap.num || pad2(i + 1), kr: r.chap.kr || '', en: r.chap.en || '' }));
+    onSave({ ...m, title: m.title.trim(), ...packSegs(rows), chapters: chapters.some((c) => c.kr.trim() || c.en.trim()) ? chapters : [] });
   };
 
-  const footer = step === 'pick' ? <><span className="grow" /><button onClick={onClose}>취소</button></> : (
+  const footer = picking && !rows.length ? <><span className="grow" /><button onClick={onClose}>취소</button></> : (
     <>
       {!isNew && <button className="ghost danger" onClick={() => { if (window.confirm(`'${meta?.title}' 영상을 프로젝트에서 뺄까요? 대사도 함께 지워집니다 (원본 파일·음성 파일은 남음).`)) onDelete(); }}>프로젝트에서 빼기</button>}
       <span className="grow muted sm">{!isNew && '구간을 바꾸면 대사·카드 시각(편집본 기준)은 그대로라 화면과 어긋날 수 있습니다.'}</span>
@@ -58,22 +138,30 @@ export default function VideoModal({ vkey, meta, isNew, initialSrc, initialTitle
 
   return (
     <Modal title={isNew ? '영상 추가' : `영상 설정 · ${meta?.title || vkey}`} onClose={onClose} footer={footer} wide>
-      {step === 'pick' ? (
+      {picking && !rows.length ? (
         <div className="vm-pick">
-          <p className="muted sm">PC에 있는 영상 파일을 고르세요. 파일은 복사하지 않고 그 위치를 그대로 사용합니다.</p>
-          <FileBrowser mode="video" height={380} onPick={pick} />
+          <p className="muted sm">첫 촬영본을 고르세요. 이어서 다른 촬영본을 더해 한 편집 영상으로 이어 붙일 수 있습니다.</p>
+          <ClipPicker sources={sources} used={used} onPick={(f) => addFile(f)} />
         </div>
       ) : (
         <div className="vm">
           <div className="vm-left">
-            <video ref={vref} src={`/api/rawvideo?path=${encodeURIComponent(m.src)}`} controls preload="metadata"
-              onTimeUpdate={(e) => setCur(e.currentTarget.currentTime)} />
-            <div className="vm-src">
-              <code title={m.src}>{m.src}</code>
-              <button className="ghost" onClick={() => setStep('pick')}>파일 변경</button>
-            </div>
-            <div className="muted sm">{info?.error ? `⚠ ${info.error}` : info ? `원본 ${fmtS(dur)} · ${info.width}×${info.height}${info.audio ? '' : ' · 소리 없음'}` : '정보 읽는 중…'}
-              {info?.width && info.width / info.height < 1.7 && ' · 16:9가 아니면 레터박스로 맞춰집니다'}</div>
+            {picking ? <ClipPicker sources={sources} used={used} onPick={(f) => addFile(f)} onCancel={() => setPicking(false)} /> : (<>
+              <video ref={vref} src={curFile ? rawUrl(curFile) : undefined} controls preload="metadata"
+                onLoadedMetadata={(e) => { if (pendingSeek.current != null) { e.currentTarget.currentTime = pendingSeek.current; pendingSeek.current = null; } }}
+                onTimeUpdate={(e) => setCur(e.currentTarget.currentTime)} />
+              <ClipMap rows={rows} file={curFile} dur={info?.duration} cur={cur} sel={sel} color={colorOf(curFile)} onSeek={seek} />
+              <div className="vm-files" role="group" aria-label="촬영본">
+                {files.map((f) => (
+                  <button key={f} className={`chip ${f === curFile ? 'on' : ''}`} title={f} onClick={() => { setCurFile(f); setCur(0); }}>
+                    <i style={{ background: colorOf(f) }} />{baseName(f)}
+                  </button>
+                ))}
+                <button className="accent sm" onClick={() => setPicking(true)}>＋ 촬영본 추가</button>
+              </div>
+              <div className="muted sm">{!info ? '정보 읽는 중…' : info.error ? `⚠ ${info.error}` : `${baseName(curFile)} · ${fmtS(info.duration)} · ${info.width}×${info.height}${info.audio ? '' : ' · 소리 없음 (무음으로 채움)'}`}
+                {info?.width && Math.abs(info.width / info.height - 16 / 9) > 0.02 && ' · 16:9가 아니면 레터박스로 맞춰집니다'}</div>
+            </>)}
             <div className="vm-meta">
               <label className="field grow"><span>영상 제목 {'{title}'}</span><input value={m.title} onChange={(e) => set({ title: e.target.value })} /></label>
               <label className="field"><span>날짜 {'{date}'}</span><input value={m.date || ''} placeholder="2026.10.14" onChange={(e) => set({ date: e.target.value })} /></label>
@@ -84,33 +172,41 @@ export default function VideoModal({ vkey, meta, isNew, initialSrc, initialTitle
             </div>
           </div>
           <div className="vm-right">
-            <div className="row"><h4 className="grow">사용할 구간 <small className="muted">편집본 {fmt(total)}</small></h4>
+            <div className="row"><h4 className="grow">편집 순서 <small className="muted">편집본 {fmt(total)} · 촬영본 {files.length}개</small></h4>
               <span className="muted sm">현재 {fmtS(cur)}</span>
-              <button onClick={addSeg}>＋ 현재 위치부터 구간</button></div>
-            <p className="muted sm">원본에서 남길 부분만 고릅니다(앞뒤 자르기·중간 빼기). 구간 사이는 짧게 페이드로 이어집니다. 챕터 제목을 적은 구간은 시작 시 챕터 카드가 나옵니다.</p>
+              <button disabled={!curFile || picking} onClick={addSeg} title="플레이어에 띄운 촬영본의 현재 위치부터 10초 구간을 선택한 구간 다음에 추가">＋ 현재 위치부터 구간</button></div>
+            <p className="muted sm">구간을 위에서부터 이어 붙입니다(사이는 짧게 페이드). 구간마다 다른 촬영본을 쓸 수 있고 ↑↓로 순서를 바꿉니다. 구간을 고르면 그 촬영본이 플레이어에 뜨고, ⇤/⇥로 현재 위치를 시작/끝으로 정합니다. 챕터 제목을 적은 구간은 시작 시 챕터 카드가 나옵니다.</p>
             <ol className="vm-segs">
-              {segs.map(([a, b], i) => (
-                <li key={i} className={problems[i] ? 'bad' : ''}>
-                  <div className="row">
-                    <b className="vm-n">{i + 1}</b>
-                    <button className="ghost sm" title="이 구간 시작으로 이동" onClick={() => seek(a)}>▶</button>
-                    <input type="number" step="0.1" value={a} onChange={(e) => setSeg(i, 0, +e.target.value)} />
-                    <button className="sm" title="현재 위치를 시작으로" onClick={() => setSeg(i, 0, cur)}>⇤</button>
-                    <span>~</span>
-                    <input type="number" step="0.1" value={b} onChange={(e) => setSeg(i, 1, +e.target.value)} />
-                    <button className="sm" title="현재 위치를 끝으로" onClick={() => setSeg(i, 1, cur)}>⇥</button>
-                    <span className="muted sm">{fmtS(b - a)}</span>
-                    <span className="grow" />
-                    <button className="ghost" disabled={segs.length < 2} onClick={() => delSeg(i)}>✕</button>
-                  </div>
-                  <div className="row">
-                    <input className="vm-cn" value={chap(i).num ?? String(i + 1).padStart(2, '0')} title="챕터 번호 {num}" onChange={(e) => setChap(i, { num: e.target.value })} />
-                    <input className="grow" value={chap(i).kr || ''} placeholder="챕터 제목 (비우면 챕터 카드 없음)" onChange={(e) => setChap(i, { kr: e.target.value })} />
-                    <input className="grow" value={chap(i).en || ''} placeholder="보조 문구 {en}" onChange={(e) => setChap(i, { en: e.target.value })} />
-                  </div>
-                  {problems[i] && <div className="warn sm">⚠ {problems[i]}</div>}
-                </li>
-              ))}
+              {rows.map((r, i) => {
+                const here = r.file === curFile;
+                return (
+                  <li key={i} className={`${problems[i] ? 'bad' : ''} ${sel === i ? 'on' : ''}`} onClick={() => selectRow(i)}>
+                    <div className="row">
+                      <b className="vm-n">{i + 1}</b>
+                      <span className="vm-file" title={r.file}><i style={{ background: colorOf(r.file) }} />{baseName(r.file)}</span>
+                      <span className="grow" />
+                      <span className="muted sm">{fmtS(r.e - r.s)}</span>
+                      <button className="ghost sm" aria-label={`${i + 1}번 구간 위로`} disabled={i === 0} onClick={(e) => { e.stopPropagation(); move(i, -1); }}>↑</button>
+                      <button className="ghost sm" aria-label={`${i + 1}번 구간 아래로`} disabled={i === rows.length - 1} onClick={(e) => { e.stopPropagation(); move(i, 1); }}>↓</button>
+                      <button className="ghost sm" aria-label={`${i + 1}번 구간 삭제`} disabled={rows.length < 2} onClick={(e) => { e.stopPropagation(); del(i); }}>✕</button>
+                    </div>
+                    <div className="row">
+                      <button className="ghost sm" title="이 구간 시작으로 이동" onClick={(e) => { e.stopPropagation(); if (here) seek(r.s); else { setSel(i); setCurFile(r.file); pendingSeek.current = r.s; } }}>▶</button>
+                      <input type="number" step="0.1" aria-label="시작(초)" value={r.s} onChange={(e) => setRow(i, { s: r1(+e.target.value) })} />
+                      <button className="sm" title="현재 위치를 시작으로" disabled={!here} onClick={(e) => { e.stopPropagation(); setRow(i, { s: r1(cur) }); }}>⇤</button>
+                      <span>~</span>
+                      <input type="number" step="0.1" aria-label="끝(초)" value={r.e} onChange={(e) => setRow(i, { e: r1(+e.target.value) })} />
+                      <button className="sm" title="현재 위치를 끝으로" disabled={!here} onClick={(e) => { e.stopPropagation(); setRow(i, { e: r1(cur) }); }}>⇥</button>
+                    </div>
+                    <div className="row">
+                      <input className="vm-cn" value={r.chap.num ?? pad2(i + 1)} title="챕터 번호 {num}" onChange={(e) => setChap(i, { num: e.target.value })} />
+                      <input className="grow" value={r.chap.kr || ''} placeholder="챕터 제목 (비우면 챕터 카드 없음)" onChange={(e) => setChap(i, { kr: e.target.value })} />
+                      <input className="grow" value={r.chap.en || ''} placeholder="보조 문구 {en}" onChange={(e) => setChap(i, { en: e.target.value })} />
+                    </div>
+                    {problems[i] && <div className="warn sm">⚠ {problems[i]}</div>}
+                  </li>
+                );
+              })}
             </ol>
             <label className="field"><span>엔딩 카드 길이(초)</span>
               <input type="number" step="0.5" min="0" value={m.end_card ?? 4} style={{ width: 90 }} onChange={(e) => set({ end_card: +e.target.value })} /></label>
