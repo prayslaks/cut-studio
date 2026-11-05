@@ -4,9 +4,10 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { APP_NAME } from './shared/app.js';
 
 export const VIDEO_EXT = ['.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4v'];
-export const DEFAULT_PARENT = path.join(os.homedir(), 'Videos', 'TTS Studio');
+export const DEFAULT_PARENT = path.join(os.homedir(), 'Videos', APP_NAME);
 
 // 새 프로젝트의 project.json(script.json) 기본값
 export function projectTemplate({ name, brand, tagline, brief, subtitleFormat }) {
@@ -73,8 +74,13 @@ export function createRegistry(appDir) {
       const p = reg.projects.find((x) => x.id === idOrDir);
       const dir = p ? p.dir : idOrDir;
       if (!dir || !exists(dir)) throw Object.assign(new Error(`프로젝트 파일(script.json)이 없습니다: ${dir}`), { status: 400 });
-      let name = p?.name;
-      try { name = JSON.parse(fs.readFileSync(path.join(dir, 'script.json'), 'utf8')).project?.name || name; } catch {}
+      let script;
+      try { script = JSON.parse(fs.readFileSync(path.join(dir, 'script.json'), 'utf8')); }
+      catch { throw Object.assign(new Error('프로젝트 파일(script.json)을 읽을 수 없습니다.'), { status: 400 }); }
+      if (!script || typeof script !== 'object' || Array.isArray(script)) {
+        throw Object.assign(new Error('올바른 프로젝트 파일이 아닙니다.'), { status: 400 });
+      }
+      const name = script.project?.name || p?.name;
       return add(dir, name || path.basename(dir));
     },
     rename(pid, name) { const p = reg.projects.find((x) => x.id === pid); if (p) { p.name = name; save(); } },
@@ -85,9 +91,14 @@ export function createRegistry(appDir) {
 }
 
 export async function createProjectDir(parent, b) {
-  const safe = String(b.name || '새 프로젝트').replace(/[\\/:*?"<>|]+/g, '_').trim() || 'project';
-  let dir = path.join(path.resolve(parent || DEFAULT_PARENT), safe); let n = 2;
-  while (fs.existsSync(path.join(dir, 'script.json'))) dir = path.join(path.resolve(parent || DEFAULT_PARENT), `${safe} (${n++})`);
+  const safe = String(b.name || '새 프로젝트').replace(/[\\/:*?"<>|\x00-\x1F]+/g, '_').trim().replace(/[. ]+$/, '') || 'project';
+  const root = path.resolve(parent || DEFAULT_PARENT);
+  await fsp.mkdir(root, { recursive: true });
+  let dir = path.join(root, safe);
+  for (let n = 2; ; n++) {
+    try { await fsp.mkdir(dir); break; }
+    catch (e) { if (e.code !== 'EEXIST') throw e; dir = path.join(root, `${safe} (${n})`); }
+  }
   await fsp.mkdir(path.join(dir, 'tts'), { recursive: true });
   await fsp.writeFile(path.join(dir, 'script.json'), JSON.stringify(projectTemplate(b), null, 2), 'utf8');
   return dir;

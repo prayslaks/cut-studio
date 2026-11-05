@@ -23,6 +23,7 @@ export function useThumbs({ say }) {
 
   const reload = useCallback(async () => { const l = await j('/api/thumbs'); setList(Array.isArray(l) ? l : []); return l; }, []);
   useEffect(() => { reload().catch(() => {}); }, [reload]);
+  useEffect(() => () => clearTimeout(timer.current), []);
 
   const persist = useCallback(async (d) => {
     setSaving(true);
@@ -36,11 +37,20 @@ export function useThumbs({ say }) {
 
   const schedule = useCallback(() => {
     clearTimeout(timer.current);
-    timer.current = setTimeout(() => { if (latest.current) persist(latest.current); }, 900);
+    timer.current = setTimeout(() => {
+      timer.current = 0;
+      if (latest.current) persist(latest.current);
+    }, 900);
   }, [persist]);
 
+  const flushPending = async () => {
+    if (!timer.current) return;
+    clearTimeout(timer.current); timer.current = 0;
+    if (latest.current && !await persist(latest.current)) throw new Error('썸네일을 저장하지 못했습니다.');
+  };
+
   const select = useCallback((id) => {
-    clearTimeout(timer.current);
+    clearTimeout(timer.current); timer.current = 0;
     const d = list.find((x) => x.id === id);
     setDraft(d ? clone(d) : null); setSelLayer(null);
     hist.current = { past: [], future: [] };
@@ -90,13 +100,13 @@ export function useThumbs({ say }) {
     setList((l) => l.filter((x) => x.id !== id)); if (latest.current?.id === id) setDraft(null);
   });
   const savePng = () => run('PNG 저장', async () => {
-    clearTimeout(timer.current); await persist(latest.current);
+    clearTimeout(timer.current); timer.current = 0; await persist(latest.current);
     const r = await post(`/api/thumbs/${latest.current.id}/save`);
     say(`썸네일 저장: ${r.path}`, 'ok');
     post('/api/open', { path: r.path }).catch(() => {});
     return r.path;
   });
-  const renderNow = () => run('렌더', async () => { clearTimeout(timer.current); return persist(latest.current); });
+  const renderNow = () => run('렌더', async () => { clearTimeout(timer.current); timer.current = 0; return persist(latest.current); });
 
   const agentGenerate = ({ key, provider, model, aiKey, count, brief }) => run('AI 초안 생성', async () => {
     const r = await post('/api/thumbs/agent', { key, provider, model, count, brief }, { 'x-ai-key': aiKey });
@@ -108,7 +118,7 @@ export function useThumbs({ say }) {
   });
 
   return { list, draft, select, update, updateLayer, beginGesture, endGesture, undo, redo, selLayer, setSelLayer,
-    create, duplicate, remove, savePng, renderNow, agentGenerate, reload, saving, busy,
+    create, duplicate, remove, savePng, renderNow, agentGenerate, reload, flushPending, saving, busy,
     canUndo: hist.current.past.length > 0, canRedo: hist.current.future.length > 0 };
 }
 

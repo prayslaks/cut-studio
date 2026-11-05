@@ -21,11 +21,11 @@ export default function FileBrowser({ mode = 'video', start = '', onPick, height
   return (
     <div className="fb">
       <div className="fb-bar">
-        <button className="ghost" disabled={data?.parent == null} title="상위 폴더" onClick={() => setDir(data?.parent || '')}>↑</button>
-        <button className="ghost" title="드라이브·바로가기" onClick={() => setDir('')}>⌂</button>
+        <button type="button" className="ghost" disabled={data?.parent == null} title="상위 폴더" onClick={() => setDir(data?.parent || '')}>↑</button>
+        <button type="button" className="ghost" title="드라이브·바로가기" onClick={() => setDir('')}>⌂</button>
         <input value={typed} placeholder="경로를 붙여넣고 Enter" onChange={(e) => setTyped(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') setDir(typed.trim().replace(/^"|"$/g, '')); }} />
-        {mode !== 'video' && data?.dir && <button className="primary" disabled={mode === 'project' && !data.isProject} onClick={() => onPick(data.dir)}>{mode === 'project' ? '이 프로젝트 열기' : '이 폴더 선택'}</button>}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); setDir(typed.trim().replace(/^"|"$/g, '')); } }} />
+        {mode !== 'video' && data?.dir && <button type="button" className="primary" disabled={mode === 'project' && !data.isProject} onClick={() => onPick(data.dir)}>{mode === 'project' ? '이 프로젝트 열기' : '이 폴더 선택'}</button>}
       </div>
       {err && <div className="fb-err">{err}</div>}
       <ul className="fb-list" style={{ height }}>

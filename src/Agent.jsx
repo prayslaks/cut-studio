@@ -11,12 +11,12 @@ const QUICK_BY_MODE = {
   style: [
     ['썸네일 톤 맞추기', '썸네일·카드와 어울리도록 자막 스타일(폰트·색·크기·외곽선)을 제안해줘.'],
     ['가독성 점검', '첨부한 화면 기준으로 자막이 잘 읽히는지, HUD와 겹치지 않는지 점검하고 스타일 수정안을 제안해줘.'],
-    ['폰트 추천', '이 게임 분위기(밀리터리·SF 공중전)에 맞는 한글 폰트 조합(자막/제목)을 추천하고 바로 적용 가능한 style 변경으로 제안해줘.'],
+    ['폰트 추천', '프로젝트와 영상 분위기에 맞는 한글 폰트 조합(자막/제목)을 추천하고 바로 적용 가능한 style 변경으로 제안해줘.'],
   ],
   cards: [
     ['인트로 다듬기', '첨부한 화면(인트로 카드 표시 중일 수 있음)을 보고 인트로 카드의 문구·배치·애니메이션을 더 임팩트 있게 개선해줘.'],
     ['썸네일 톤 맞추기', '선택된 썸네일 느낌과 어울리도록 현재 카드를 조정해줘.'],
-    ['챕터 카드 정리', '챕터 카드가 게임 화면을 너무 가리지 않으면서 잘 읽히도록 크기·위치·배경을 조정해줘.'],
+    ['챕터 카드 정리', '챕터 카드가 영상의 중요한 내용을 가리지 않으면서 잘 읽히도록 크기·위치·배경을 조정해줘.'],
   ],
   thumbs: [
     ['이 썸네일 개선', '첨부한 썸네일을 보고 클릭을 부르는 방향으로 레이어(문구·크기·색·배치)를 개선해줘.'],
@@ -30,7 +30,11 @@ const QUICK = [
   ['현재 장면 대사 제안', '첨부한 현재 화면을 보고, 지금 재생 위치에 들어갈 나레이션 대사를 제안해줘. 앞뒤 대사와 겹치지 않게 시작 시각도 정해줘.'],
   ['겹침 해결', '겹침 경고가 있는 대사들을 시작 시각 조정이나 문장 축약으로 해결해줘.'],
   ['발음 점검', '모든 대사에서 TTS가 잘못 읽을 만한 영어·숫자·기호·약어를 찾아서 발음 사전 규칙이나 줄별 발음(tts)으로 고쳐줘.'],
-  ['톤 통일', '전체 대사를 개발자 소개 톤으로 일관되게 맞추고, 과장되거나 사실 확인이 필요한 표현은 지적해줘.'],
+  ['톤 통일', '전체 대사를 프로젝트 설명에 맞는 톤으로 통일하고, 과장되거나 사실 확인이 필요한 표현은 지적해줘.'],
+];
+const REFERENCE_QUICK = [
+  ['자료 요약', '이 프로젝트의 참고 자료에서 현재 영상에 쓸 수 있는 핵심 사실과 확인할 점을 정리해줘. 근거로 삼은 자료 이름을 표시해줘.'],
+  ['자료로 대사 초안', '프로젝트 참고 자료와 현재 영상의 맥락으로 나레이션 초안을 제안해줘. 근거가 부족한 내용은 구분하고, 대사 추가는 검토 가능한 편집 제안으로 작성해줘.'],
 ];
 
 const ls = {
@@ -38,12 +42,11 @@ const ls = {
   set: (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} },
 };
 
-export default function Agent({ keys, ai, mode = 'lines', onOpenSettings, buildContext, captureFrame, applyOps, annotate, describeOp, say }) {
+export default function Agent({ keys, ai, mode = 'lines', projectId, activeReferences, onOpenReferences,
+  msgs, setMsgs, busy, setBusy, onOpenSettings, buildContext, captureFrame, applyOps, annotate, describeOp, say }) {
   const { provider, model } = ai;
-  const [msgs, setMsgs] = useState([]);
   const [input, setInput] = useState('');
   const [attach, setAttach] = useState(true);
-  const [busy, setBusy] = useState(false);
   const endRef = useRef(null);
 
   const key = keys[provider] || '';
@@ -53,10 +56,11 @@ export default function Agent({ keys, ai, mode = 'lines', onOpenSettings, buildC
     text = (text ?? input).trim();
     if (!text || busy) return;
     if (!key) { onOpenSettings(); say(`설정에서 ${PROVIDERS[provider].label} API 키를 등록하세요`, 'err'); return; }
+    setBusy(true);
     const image = attach ? await Promise.resolve(captureFrame()).catch(() => null) : null;
     const userMsg = { role: 'user', text, image };
     const history = [...msgs, userMsg];
-    setMsgs(history); setInput(''); setBusy(true);
+    setMsgs(() => history); setInput('');
     try {
       // 이미지는 가장 최근 사용자 메시지에만 첨부 (요청 크기 절약)
       const lastUser = history.length - 1;
@@ -68,7 +72,7 @@ export default function Agent({ keys, ai, mode = 'lines', onOpenSettings, buildC
         image: i === lastUser ? m.image : null,
       }));
       const r = await fetch('/api/agent', {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'x-ai-key': key },
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'x-ai-key': key, 'x-project-id': projectId },
         body: JSON.stringify({ provider, model, system: buildContext(), messages: payload }),
       });
       const j = await r.json();
@@ -89,7 +93,7 @@ export default function Agent({ keys, ai, mode = 'lines', onOpenSettings, buildC
   };
   const dismiss = (mi, idx) => setMsgs((all) => all.map((x, i) => (i === mi ? { ...x, skipped: [...(x.skipped || []), idx] } : x)));
 
-  const quick = QUICK_BY_MODE[mode] || QUICK;
+  const quick = mode === 'lines' && activeReferences > 0 ? [...REFERENCE_QUICK, ...QUICK] : QUICK_BY_MODE[mode] || QUICK;
 
   return (
     <div className="agent">
@@ -98,8 +102,9 @@ export default function Agent({ keys, ai, mode = 'lines', onOpenSettings, buildC
         <span className="grow" />
         {!key && <button className="accent" onClick={onOpenSettings}>키 등록</button>}
         <button className="ghost" title="AI 설정" onClick={onOpenSettings}>⚙</button>
-        <button className="ghost" title="대화 비우기" onClick={() => setMsgs([])}>↺</button>
+        <button className="ghost" title="대화 비우기" disabled={busy} onClick={() => setMsgs(() => [])}>↺</button>
       </div>
+      <button className="ghost agent-references" onClick={onOpenReferences}>프로젝트 자료 · AI 참고 {activeReferences}개</button>
       <div className="agent-log">
         {!msgs.length && (
           <div className="agent-empty">

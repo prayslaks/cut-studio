@@ -287,11 +287,11 @@ export function ExportModal({ summaries, titles, tracks, combos, setCombos, dirt
                 <input type="checkbox" checked={(opt.combos || []).includes(c.id)} onChange={() => toggleC(c.id)} />
                 <input className="cname" value={c.name} onChange={(e) => editC(c.id, { name: e.target.value })} placeholder="이름" />
                 <label>음성<select value={c.audio || ''} onChange={(e) => editC(c.id, { audio: e.target.value || null })}>
-                  {tracks.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}<option value="">없음 (게임 소리만)</option></select></label>
+                  {tracks.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}<option value="">없음 (원본 소리만)</option></select></label>
                 <label title={c.audioOnly ? '오디오만 내보낼 때는 자막이 들어가지 않음' : '영상에 번인할 자막'}>자막<select value={c.subs || ''} disabled={c.audioOnly} onChange={(e) => editC(c.id, { subs: e.target.value || null })}>
                   {tracks.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}<option value="">없음</option></select></label>
                 <label title="파일명 끝에 붙는 글자 (…_편집본 + 접미사 .mp4)">접미사<input className="csuf" value={c.suffix || ''} placeholder="(없음)" onChange={(e) => editC(c.id, { suffix: e.target.value })} /></label>
-                <label className="chk" title="영상 없이 같은 길이의 최종 오디오(게임 소리 + 이 트랙 나레이션)만 .m4a로 — 유튜브 다국어 오디오 트랙용">
+                <label className="chk" title="영상 없이 같은 길이의 최종 오디오(원본 소리 + 이 트랙 나레이션)만 .m4a로 — 유튜브 다국어 오디오 트랙용">
                   <input type="checkbox" checked={!!c.audioOnly} onChange={(e) => editC(c.id, { audioOnly: e.target.checked })} />오디오만</label>
                 <button className="ghost" title="조합 삭제" disabled={combos.length < 2} onClick={() => { setCombos((cs) => cs.filter((x) => x.id !== c.id)); set('combos', (opt.combos || []).filter((x) => x !== c.id)); }}>✕</button>
               </div>
@@ -309,11 +309,11 @@ export function ExportModal({ summaries, titles, tracks, combos, setCombos, dirt
               <select value={opt.encoder} onChange={(e) => set('encoder', e.target.value)} disabled={!ff?.ok}>
                 {(ff?.encoders || []).map((e) => <option key={e} value={e}>{ff.labels?.[e] || e}</option>)}
               </select></div>
-            <div className="og"><span>게임 사운드 <b>{Math.round(opt.gameVolume * 100)}%</b></span>
+            <div className="og"><span>원본 오디오 <b>{Math.round(opt.gameVolume * 100)}%</b></span>
               <input type="range" min="0" max="1" step="0.05" value={opt.gameVolume} onChange={(e) => set('gameVolume', +e.target.value)} /></div>
-            <div className="og" title="엔딩 카드로 넘어가기 전, 원본 게임 소리를 이 시간 동안 서서히 줄임 (나레이션은 영향 없음)"><span>엔딩 전 게임 소리 페이드아웃 <b>{(opt.endFade ?? 3).toFixed(1)}초</b></span>
+            <div className="og" title="엔딩 카드로 넘어가기 전, 원본 소리를 이 시간 동안 서서히 줄임 (나레이션은 영향 없음)"><span>엔딩 전 원본 소리 페이드아웃 <b>{(opt.endFade ?? 3).toFixed(1)}초</b></span>
               <input type="range" min="0.4" max="8" step="0.1" value={opt.endFade ?? 3} onChange={(e) => set('endFade', +e.target.value)} /></div>
-            <label className="chk"><input type="checkbox" checked={opt.tts} onChange={(e) => set('tts', e.target.checked)} />TTS 나레이션 포함 (나레이션 중 게임음 자동 감쇄)</label>
+            <label className="chk"><input type="checkbox" checked={opt.tts} onChange={(e) => set('tts', e.target.checked)} />TTS 나레이션 포함 (나레이션 중 원본 오디오 자동 감쇄)</label>
             <label className="chk"><input type="checkbox" checked={opt.srt} onChange={(e) => set('srt', e.target.checked)} />SRT 자막 파일도 저장 (유튜브 업로드용)</label>
           </div>
           <div className="outinfo muted">

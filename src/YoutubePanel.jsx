@@ -73,7 +73,7 @@ export default function YoutubePanel({ meta, setMeta, tl, tab, ai, aiKey, onOpen
           <b>AI 추천</b><span className="muted sm">{PROVIDERS[ai.provider]?.label} · {ai.model}</span>
         </div>
         <label className="field"><span>사실 메모 — AI가 참고할 내용 (촬영일, 강조할 시스템, 행사 해시태그 등. 저장됨)</span>
-          <textarea rows={2} value={yt.notes || ''} placeholder="예: 7월 7일 촬영, 편대 명령·부스트 특수 기동 강조, #코리아인디게임데브캠프 포함"
+          <textarea rows={2} value={yt.notes || ''} placeholder="예: 촬영 장소와 출연자 소개, 시리즈 재생목록 안내"
             onChange={(e) => set({ notes: e.target.value })} /></label>
         <div className="row">
           <input className="grow" value={brief} placeholder="이번 요청 (예: 더 짧고 강하게, 개발기록 톤으로)" onChange={(e) => setBrief(e.target.value)} />

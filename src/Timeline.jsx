@@ -1,55 +1,87 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { fmt } from './timeline.js';
 
-const TICKS = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
+const TICKS = [0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600];
+const MAX_ZOOM = 80;
 const KIND = { intro: '인트로', chapter: '챕터', end: '엔딩' };
-const mmss = (t) => { const m = Math.floor(t / 60), s = Math.round(t % 60); return `${m}:${String(s).padStart(2, '0')}`; };
+const rulerTime = (t, step) => {
+  const tenths = Math.round(t * 10);
+  const seconds = ((tenths % 600) / 10).toFixed(step < 1 ? 1 : 0);
+  return `${Math.floor(tenths / 600)}:${seconds.padStart(step < 1 ? 4 : 2, '0')}`;
+};
 
 // 멀티 트랙 타임라인: 눈금 / 영상 구간 / 카드 / 나레이션(자막·음성) / 썸네일 장면
 // - 빈 곳 클릭·드래그: 재생 위치 이동, 대사·카드 블록 드래그: 시작 시각 이동, Ctrl+휠: 확대
 export default function Timeline({ tl, lines, trackName, durOf, statusOf, warnings, editTime, sel, playing, onSeek, onSel, onMove, onDragStart, onDrop,
   chapters = [], insts = [], thumbs = [], onCardClick, onCardMove, onCardDragStart, onThumbClick }) {
   const scRef = useRef(null);
+  const wrapRef = useRef(null);
   const ref = useRef(null);
   const drag = useRef(null);
+  const pendingZoom = useRef(null);
   const [tip, setTip] = useState(null);
   const [zoom, setZoom] = useState(1);
   const [vw, setVw] = useState(800);
+  const [scrollLeft, setScrollLeft] = useState(0);
   useLayoutEffect(() => {
     const el = scRef.current; if (!el) return;
-    const ro = new ResizeObserver(() => setVw(el.clientWidth)); ro.observe(el); setVw(el.clientWidth);
+    const measure = () => { if (el.clientWidth) setVw(el.clientWidth); };
+    const ro = new ResizeObserver(measure); ro.observe(el); measure();
     return () => ro.disconnect();
   }, []);
-  const W = vw * zoom; const pps = W / Math.max(1, tl.total);
-  const px = (t) => (t / tl.total) * W;
-  const toT = (x) => { const r = ref.current.getBoundingClientRect(); return Math.max(0, Math.min(tl.total, ((x - r.left) / r.width) * tl.total)); };
-  const step = TICKS.find((s) => s * pps >= 70) || 600;
+  const W = vw * zoom; const pps = W / (tl.total || 1);
+  const px = (t) => t * pps;
+  const toT = (x) => { const r = ref.current.getBoundingClientRect(); return Math.max(0, Math.min(tl.total, (x - r.left) / pps)); };
+  const step = TICKS.find((s) => s * pps >= 70) || TICKS.at(-1);
+  const viewStart = Math.min(tl.total, scrollLeft / pps);
+  const viewEnd = Math.min(tl.total, (scrollLeft + vw) / pps);
 
-  // 재생 중 재생 위치가 화면 밖으로 나가면 따라 스크롤
+  // 재생 위치가 바뀌었을 때만 따라간다. 확대하거나 범위를 둘러보는 동안에는 위치를 유지한다.
   useEffect(() => {
-    const el = scRef.current; if (!el || zoom <= 1) return;
-    const x = px(editTime);
+    const el = scRef.current; if (!el || !tl.total || el.scrollWidth <= el.clientWidth) return;
+    const x = editTime / tl.total * ref.current.offsetWidth;
     if (x < el.scrollLeft + 20 || x > el.scrollLeft + el.clientWidth - 40) el.scrollLeft = Math.max(0, x - el.clientWidth * (playing ? 0.15 : 0.4));
-  }, [editTime, zoom]); // eslint-disable-line
+  }, [editTime, playing, tl.total]);
 
-  // Ctrl+휠 확대 (커서 위치 고정)
+  const changeZoom = (factor, anchor) => {
+    const el = scRef.current;
+    const current = pendingZoom.current || { scale: zoom, left: el.scrollLeft };
+    const scale = factor === null ? 1 : Math.max(1, Math.min(MAX_ZOOM, current.scale * factor));
+    if (scale === current.scale) return;
+    const left = Math.max(0, Math.min(vw * (scale - 1), (current.left + anchor) * scale / current.scale - anchor));
+    pendingZoom.current = { scale, left };
+    setZoom(scale);
+  };
+  useLayoutEffect(() => {
+    const next = pendingZoom.current;
+    if (!next) return;
+    scRef.current.scrollLeft = next.left;
+    setScrollLeft(scRef.current.scrollLeft);
+    pendingZoom.current = null;
+  });
+
   const wheel = useRef(null);
   wheel.current = (e) => {
-    if (!e.ctrlKey && !e.metaKey) return;
-    e.preventDefault();
-    const el = scRef.current; const r = el.getBoundingClientRect();
-    const cx = e.clientX - r.left; const t = (el.scrollLeft + cx) / W * tl.total;
-    const nz = Math.max(1, Math.min(40, zoom * (e.deltaY < 0 ? 1.25 : 0.8)));
-    setZoom(nz);
-    requestAnimationFrame(() => { el.scrollLeft = (t / tl.total) * vw * nz - cx; });
+    const el = scRef.current;
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const anchor = Math.max(0, Math.min(el.clientWidth, e.clientX - el.getBoundingClientRect().left));
+      if (e.deltaY) changeZoom(e.deltaY < 0 ? 1.25 : 1 / 1.25, anchor);
+    } else if (e.shiftKey && !e.deltaX && el.scrollWidth > el.clientWidth) {
+      e.preventDefault();
+      el.scrollLeft += e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? el.clientWidth : 1);
+    }
   };
   useEffect(() => {
-    const el = scRef.current; if (!el) return;
+    const el = wrapRef.current;
     const h = (e) => wheel.current(e); el.addEventListener('wheel', h, { passive: false });
     return () => el.removeEventListener('wheel', h);
   }, []);
-  const zoomBy = (k) => { const el = scRef.current; const center = (el.scrollLeft + el.clientWidth / 2) / W * tl.total; const nz = Math.max(1, Math.min(40, zoom * k)); setZoom(nz);
-    requestAnimationFrame(() => { el.scrollLeft = (center / tl.total) * vw * nz - el.clientWidth / 2; }); };
+  const zoomBy = (factor) => {
+    const el = scRef.current;
+    const cursor = px(editTime) - el.scrollLeft;
+    changeZoom(factor, cursor >= 0 && cursor < el.clientWidth ? cursor : el.clientWidth / 2);
+  };
 
   const downBg = (e) => {
     if (e.button !== 0) return;
@@ -89,22 +121,31 @@ export default function Timeline({ tl, lines, trackName, durOf, statusOf, warnin
   }, [onMove, onSeek, onCardMove]);
   useEffect(() => { window.addEventListener('keydown', cancel); return () => window.removeEventListener('keydown', cancel); }, [cancel]);
 
-  const ticks = []; for (let t = 0; t <= tl.total; t += step) ticks.push(t);
+  const ticks = []; for (let i = 0; i * step < tl.total; i++) ticks.push(i * step);
   const cls = (d) => (drag.current?.moved && drag.current[d.k] === d.v ? 'dragging' : '');
 
   return (
-    <div className="mtl">
+    <div className="mtl" ref={wrapRef}>
+      <div className="mtl-toolbar">
+        <div className="mtl-zoom" aria-label="타임라인 확대·축소" role="group">
+          <button className="ghost" aria-label="타임라인 축소" onClick={() => zoomBy(1 / 1.5)} disabled={zoom <= 1}>−</button>
+          <button className="ghost" aria-label="타임라인 확대" onClick={() => zoomBy(1.5)} disabled={zoom >= MAX_ZOOM}>＋</button>
+          <button className="ghost" onClick={() => changeZoom(null, 0)} disabled={zoom <= 1}>전체 보기</button>
+        </div>
+        <span className="mtl-range" title="타임라인에 표시 중인 편집본 범위">{fmt(viewStart)} – {fmt(viewEnd)}</span>
+        <span className="mtl-hint">Ctrl+휠 확대·축소 · Shift+휠 이동</span>
+      </div>
       <div className="mtl-labels">
-        <span className="r-ruler"><button className="ghost" title="축소" onClick={() => zoomBy(0.66)} disabled={zoom <= 1}>−</button><button className="ghost" title="확대 (Ctrl+휠)" onClick={() => zoomBy(1.5)}>+</button></span>
+        <span className="r-ruler">시간</span>
         <span className="r-video">영상</span>
         <span className="r-cards">카드</span>
         <span className="r-lines" title={trackName ? `나레이션 트랙: ${trackName}` : undefined}>{trackName || '나레이션'}</span>
         <span className="r-thumbs">썸네일</span>
       </div>
-      <div className="mtl-scroll" ref={scRef}>
+      <div className="mtl-scroll" ref={scRef} tabIndex={0} role="region" aria-label="편집본 타임라인" onScroll={(e) => setScrollLeft(e.currentTarget.scrollLeft)}>
         <div className="mtl-inner" ref={ref} style={{ width: W }} onPointerDown={downBg} onPointerMove={move} onPointerUp={up} onPointerCancel={up}>
           <div className="trk r-ruler">
-            {ticks.map((t) => <span key={t} className="tick" style={{ left: px(t) }}>{mmss(t)}</span>)}
+            {ticks.map((t) => <span key={t} className="tick" style={{ left: px(t) }}>{rulerTime(t, step)}</span>)}
           </div>
           <div className="trk r-video">
             {tl.parts.map((g) => {
@@ -141,7 +182,7 @@ export default function Timeline({ tl, lines, trackName, durOf, statusOf, warnin
                 onPointerDown={(e) => downItem(e, { mode: 'thumb', th: d, t0: d.t, fixed: true })} />
             ))}
           </div>
-          <div className="head" style={{ left: px(editTime) }} />
+          <div className="head" style={{ left: Math.min(px(editTime), W - 2) }} />
           {tip && <div className="tl-tip" style={{ left: tip.x }}>{tip.text}</div>}
         </div>
       </div>

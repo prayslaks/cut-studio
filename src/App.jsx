@@ -11,7 +11,8 @@ import ThumbInspector from './thumbs/ThumbInspector.jsx';
 import ThumbsSide from './thumbs/ThumbsSide.jsx';
 import { PROVIDERS } from './Agent.jsx';
 import { resolveStyle } from '../shared/layout.js';
-import { SettingsModal, ExportModal } from './Modals.jsx';
+import { Modal, SettingsModal, ExportModal } from './Modals.jsx';
+import { APP_NAME } from '../shared/app.js';
 import { useCards } from './cards/useCards.js';
 import CardsPanel from './cards/CardsPanel.jsx';
 import YoutubePanel from './YoutubePanel.jsx';
@@ -19,11 +20,14 @@ import Timeline from './Timeline.jsx';
 import VideoModal from './project/VideoModal.jsx';
 import ProjectHome from './project/ProjectHome.jsx';
 import ProjectSettings from './project/ProjectSettings.jsx';
+import ReferenceLibrary from './project/ReferenceLibrary.jsx';
 import CardInspector from './cards/CardInspector.jsx';
 import CardEditOverlay from './cards/CardEditOverlay.jsx';
 import { cardInstances, cardFocusTime, newCardText, newCardRect, newCardGrad } from '../shared/cards.js';
-import { MAIN, DEFAULT_VOICE, DEFAULT_VS, trackOf, trackList, trackCfg, patchTrackCfg, nextLineId, exportCombos, applyDict } from '../shared/tracks.js';
+import { MAIN, trackOf, trackList, trackCfg, patchTrackCfg, nextLineId, exportCombos, applyDict } from '../shared/tracks.js';
+import { createVoiceProfile, migrateVoiceProfiles, resolveVoiceProfile, modelCaps, toneOf, withTone } from '../shared/voices.js';
 import TrackModal from './TrackModal.jsx';
+import VoicePanel from './VoicePanel.jsx';
 const mergeLayer = (l, p = {}) => { const o = { ...l }; for (const [k, v] of Object.entries(p)) o[k] = v && typeof v === 'object' && !Array.isArray(v) && l[k] && typeof l[k] === 'object' ? { ...l[k], ...v } : v; return o; };
 
 // API 키로 /v1/models 를 불러오면 계정에서 쓸 수 있는 목록으로 교체됨
@@ -34,24 +38,7 @@ const FALLBACK_MODELS = [
   { model_id: 'eleven_multilingual_v2', name: 'Eleven Multilingual v2' },
   { model_id: 'eleven_flash_v2_5', name: 'Eleven Flash v2.5' },
 ];
-// 모델별로 받는 voice_settings 항목 (v4: Stability/Similarity만, SSML 미지원)
-const modelCaps = (id = '') => {
-  if (id.startsWith('eleven_v4')) return { keys: ['stability', 'similarity_boost'], lang: true, tags: true };
-  if (id.startsWith('eleven_v3')) return { keys: ['stability', 'similarity_boost', 'use_speaker_boost'], lang: true, tags: true };
-  if (id === 'eleven_multilingual_v2') return { keys: ['stability', 'similarity_boost', 'style', 'use_speaker_boost', 'speed'], lang: false, tags: false };
-  return { keys: ['stability', 'similarity_boost', 'style', 'use_speaker_boost', 'speed'], lang: true, tags: false };
-};
 const pickVS = (vs, model) => Object.fromEntries(modelCaps(model).keys.filter((k) => vs[k] != null).map((k) => [k, vs[k]]));
-
-// 기본 톤 프리셋 (Eleven v3/v4 오디오 태그 — 영어 지시어가 가장 안정적)
-const TONE_PRESETS = [
-  ['나레이션', '[narrator]'], ['차분한', '[calm]'], ['자신감 있는', '[confident]'], ['진지한', '[serious]'],
-  ['따뜻한', '[warm]'], ['또렷한', '[clear articulation]'], ['다큐멘터리', '[documentary style]'], ['활기찬', '[energetic]'],
-  ['긴박한', '[tense]'], ['천천히', '[slow pace]'],
-];
-const parseTags = (s = '') => (s.match(/\[[^\]]+\]/g) || []);
-// 불러온 보이스 설정에 빠진 기본값 채우기 (기본 트랙·추가 트랙 공통)
-const fillVoice = (v = {}) => ({ ...DEFAULT_VOICE, ...v, tone: { ...DEFAULT_VOICE.tone, ...(v.tone || {}) } });
 
 async function api(url, { key, ...opt } = {}) {
   const r = await fetch(url, { ...opt, headers: { ...(opt.headers || {}), ...(key ? { 'x-el-key': key } : {}) } });
@@ -66,6 +53,8 @@ const ls = {
   set: (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} },
 };
 
+const DEFAULT_LAYOUT = { mid: 520, asst: 320, stageH: null, canvasH: null, timelineOpen: true, timelineHeight: 100 };
+
 const pick = (o, ks) => Object.fromEntries(ks.filter((k) => o[k] != null).map((k) => [k, o[k]]));
 function deepMergeObj(a = {}, b = {}) {
   const o = { ...a };
@@ -76,12 +65,19 @@ function deepMergeObj(a = {}, b = {}) {
 
 const nextKey = (s) => { for (const c of 'ABCDEFGHIJKLMNOPQRSTUVWXYZ') if (!s.meta?.[c] && !s[c]) return c; return `V${Date.now().toString(36)}`; };
 
-export default function App({ project }) {
+export default function App({ project, onProjectChange }) {
   const [script, setScript] = useState(null);
+  const [references, setReferences] = useState(null);
+  const [referencesError, setReferencesError] = useState('');
+  const [agentThreads, setAgentThreads] = useState({});
   const [dirty, setDirty] = useState(false);
   const [tab, setTab] = useState(() => ls.get('zk.tab', ''));
   const [vmodal, setVmodal] = useState(null); // { key, isNew }
-  const [phome, setPhome] = useState(false);
+  const [phome, setPhome] = useState(null);
+  const [projectPrompt, setProjectPrompt] = useState(null);
+  const [closingProject, setClosingProject] = useState(false);
+  const savesInProgress = useRef(0);
+  const projectMenuRef = useRef(null);
   const [tts, setTts] = useState({});
   const [durs, setDurs] = useState({});
   const [keys, setKeys] = useState(() => ({ el: ls.get('zk.elkey', ''), anthropic: ls.get('zk.ai.key.anthropic', ''), openai: ls.get('zk.ai.key.openai', '') }));
@@ -104,7 +100,8 @@ export default function App({ project }) {
   const [playing, setPlaying] = useState(false);
   const [gameVol, setGameVol] = useState(0.6);
   const [context, setContext] = useState(false);
-  const [side, setSide] = useState(() => { const v = ls.get('zk.side', 'lines'); return ['lines', 'style', 'cards', 'thumbs', 'youtube'].includes(v) ? v : 'lines'; });
+  const [side, setSide] = useState(() => { const v = ls.get('zk.side', 'lines'); return ['lines', 'voice', 'style', 'cards', 'thumbs', 'youtube'].includes(v) ? v : 'lines'; });
+  const [voiceProfileSel, setVoiceProfileSel] = useState('');
 
   const videoRef = useRef(null);
   const [scriptReady, setScriptReady] = useState(false);
@@ -112,15 +109,14 @@ export default function App({ project }) {
   const [font, setFont] = useState('Malgun Gothic');
   const [shot, setShot] = useState(null); // ffmpeg 실제 렌더 프레임
   const [compare, setCompare] = useState(false); // 썸네일: 실제 렌더 겹쳐 보기
-  const [asstOpen, setAsstOpen] = useState(() => ls.get('zk.asst', '1') === '1');
-  // 자유 레이아웃: 가운데 패널·어시스턴트 너비, 영상/썸네일 캔버스 높이 (드래그 분할선, localStorage 기억)
-  const LAYOUT0 = { mid: 460, asst: 380, stageH: null, canvasH: null };
-  const [lay, setLay] = useState(() => { try { return { ...LAYOUT0, ...JSON.parse(ls.get('zk.layout', '{}')) }; } catch { return LAYOUT0; } });
+  const [asstOpen, setAsstOpen] = useState(() => ls.get('zk.asst', '0') === '1');
+  const [lay, setLay] = useState(() => { try { return { ...DEFAULT_LAYOUT, ...JSON.parse(ls.get('zk.layout', '{}')) }; } catch { return DEFAULT_LAYOUT; } });
   useEffect(() => { ls.set('zk.layout', JSON.stringify(lay)); }, [lay]);
   const setL = (k, v) => setLay((x) => ({ ...x, [k]: v }));
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
   const stageRef = useRef(null);
   const canvasWrapRef = useRef(null);
+  const timelineTracksRef = useRef(null);
   const [ai, setAi] = useState(() => {
     const provider = ls.get('zk.ai.provider', 'anthropic');
     return { provider, model: ls.get(`zk.ai.model.${provider}`, PROVIDERS[provider]?.models[0]) };
@@ -196,21 +192,27 @@ export default function App({ project }) {
 
   // ---------- 데이터 로드 ----------
   const refreshTts = useCallback(async () => setTts(await api('/api/tts')), []);
+  const loadProjectReferences = useCallback(async () => {
+    setReferencesError('');
+    try { setReferences(await api('/api/references', { headers: { 'x-project-id': project.id } })); }
+    catch (e) { setReferencesError(e.message); }
+  }, [project.id]);
+  useEffect(() => { loadProjectReferences(); }, [loadProjectReferences]);
+  const saveProjectReferences = async (entries) => {
+    const saved = await api('/api/references', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json', 'x-project-id': project.id }, body: JSON.stringify(entries),
+    });
+    setReferences(saved);
+  };
   useEffect(() => {
-    api('/api/script').then((s) => {
-      s.voice_settings = { ...DEFAULT_VS, ...(s.voice_settings || {}) };
-      s.voice = fillVoice(s.voice);
-      s.pronunciation = s.pronunciation || [];
-      if (s.tracks) s.tracks = s.tracks.map((t) => (t.id === MAIN ? t : { ...t, voice: fillVoice(t.voice), voice_settings: { ...DEFAULT_VS, ...(t.voice_settings || {}) }, pronunciation: t.pronunciation || [] }));
-      setScript(s);
-    }).catch((e) => say(`대본 로드 실패: ${e.message}`, 'err'));
+    api('/api/script').then((s) => setScript(migrateVoiceProfiles(s))).catch((e) => say(`대본 로드 실패: ${e.message}`, 'err'));
     refreshTts().catch((e) => say(`TTS 목록 로드 실패: ${e.message}`, 'err'));
     api('/api/font').then((f) => setFont(f.font)).catch(() => {});
     api('/api/fonts').then(setFontsList).catch(() => {});
   }, [refreshTts, say]);
 
   useEffect(() => { if (tab) ls.set('zk.tab', tab); }, [tab]);
-  useEffect(() => { document.title = `${script?.project?.name || project?.name || '프로젝트'} · TTS Studio`; }, [script?.project?.name, project?.name]);
+  useEffect(() => { document.title = `${script?.project?.name || project?.name || '프로젝트'} · ${APP_NAME}`; }, [script?.project?.name, project?.name]);
   useEffect(() => { if (script && !(script.videos || []).includes(tab)) setTab(script.videos?.[0] || ''); }, [script, tab]);
   useEffect(() => { ls.set('zk.side', side); }, [side]);
   useEffect(() => {
@@ -284,27 +286,23 @@ export default function App({ project }) {
   useEffect(() => { ls.set('zk.track', track); }, [track]);
   const [tmodal, setTmodal] = useState(null); // { mode: 'add' | 'edit', id? }
   const cfg = useMemo(() => trackCfg(script, track), [script, track]);
+  const defaultProfile = resolveVoiceProfile(script, track);
+  const defaultVoice = defaultProfile.voice;
+  const selectTrack = (id) => {
+    if (id === track) return;
+    stop(); setSel(null); setTrackSel(id); setVoiceProfileSel('');
+  };
   const lines = useMemo(() => (script?.[tab] || []).filter((l) => trackOf(l) === track).sort((a, b) => a.start - b.start), [script, tab, track]);
   const insts = useMemo(() => cardInstances(C.cards, { meta: meta || {}, offs: tl.parts.map((p) => p.off), body: tl.body, total: tl.total, project: script?.project }), [C.cards, meta, tl, script?.project]);
   const setMeta = useCallback((fn) => { setScript((s) => ({ ...s, meta: { ...s.meta, [tab]: fn(s.meta[tab]) } })); setDirty(true); }, [tab]);
 
-  // 줄이 속한 트랙의 보이스·사전 (다른 트랙 줄의 상태 계산에도 쓰임)
-  const cfgOf = useCallback((l) => trackCfg(script, trackOf(l)), [script]);
+  const profileOf = useCallback((l) => resolveVoiceProfile(script, trackOf(l), l.voiceProfileId), [script]);
   // 실제로 TTS에 보낼 텍스트: 발음 입력이 있으면 그것, 없으면 자막에 발음 사전 적용
-  const ttsText = useCallback((l) => (l.tts?.trim() ? l.tts : applyDict(l.text, cfgOf(l).pronunciation)), [cfgOf]);
+  const ttsText = useCallback((l) => (l.tts?.trim() ? l.tts : applyDict(l.text, trackCfg(script, trackOf(l)).pronunciation)), [script]);
 
   // 실제 ElevenLabs로 보내는 텍스트 = (기본 톤 태그) + 발음 텍스트
-  const toneOf = (voice) => {
-    const t = voice?.tone; const id = voice?.model_id || '';
-    return t?.enabled && (id.startsWith('eleven_v4') || id.startsWith('eleven_v3')) ? parseTags(t.tags).join('') : '';
-  };
-  const toneTags = toneOf(cfg.voice);
-  const sendText = useCallback((l) => {
-    const base = ttsText(l); const v = cfgOf(l).voice; const tags = toneOf(v);
-    if (!tags || !base.trim()) return base;
-    if (v.tone?.override && /^\s*\[/.test(base)) return base; // 줄 자체 태그가 우선
-    return `${tags} ${base}`;
-  }, [ttsText, cfgOf]);
+  const toneTags = toneOf(defaultVoice);
+  const sendText = useCallback((l) => withTone(ttsText(l), profileOf(l).voice), [ttsText, profileOf]);
 
   const durOf = useCallback((l) => {
     const info = tts[l.id];
@@ -318,11 +316,13 @@ export default function App({ project }) {
     const m = info.meta;
     if (!m) return 'ok';
     if ((m.tts_text ?? m.text) !== sendText(l)) return 'stale';
-    const v = cfgOf(l).voice;
+    const { voice: v, voice_settings: settings } = profileOf(l);
     if (v.voice_id && m.voice_id !== v.voice_id) return 'voice';
     if (m.model_id && v.model_id && m.model_id !== v.model_id) return 'voice';
+    if ('language_code' in m && (m.language_code || null) !== (modelCaps(v.model_id).lang && v.language_code || null)) return 'voice';
+    if (m.voice_settings && Object.entries(pickVS(settings, v.model_id)).some(([k, value]) => k in m.voice_settings && m.voice_settings[k] !== value)) return 'voice';
     return 'ok';
-  }, [tts, cfgOf, sendText]);
+  }, [tts, profileOf, sendText]);
 
   const warnings = useMemo(() => {
     const w = {};
@@ -343,6 +343,8 @@ export default function App({ project }) {
     setDirty(true);
   };
   const listRef = useRef(null);
+  const trackListRef = useRef(null);
+  const pendingLineFocus = useRef(null);
   const scrollLock = useRef(false);
   const [follow, setFollow] = useState(() => ls.get('zk.follow', '1') === '1');
   const scrollToLine = useCallback((id, flash = true) => {
@@ -352,13 +354,31 @@ export default function App({ project }) {
   }, []);
   const liveId = lines.find((l) => editTime >= l.start && editTime < l.start + durOf(l) + SUB_TAIL)?.id;
   useEffect(() => { if (follow && playing && liveId) scrollToLine(liveId, false); }, [liveId, follow, playing, scrollToLine]);
+  useEffect(() => {
+    const list = trackListRef.current;
+    const selected = list?.querySelector('[aria-pressed="true"]');
+    if (!selected) return;
+    const bounds = list.getBoundingClientRect();
+    const chip = selected.getBoundingClientRect();
+    list.scrollLeft += Math.min(chip.left - bounds.left, 0) + Math.max(chip.right - bounds.right, 0);
+  }, [track, side]);
   // 선택이 바뀌면(타임라인 클릭·드래그 등) 목록을 그 대사로 스크롤 (목록에서 직접 클릭한 경우 제외)
-  useEffect(() => { if (!sel) return; if (scrollLock.current) { scrollLock.current = false; return; } scrollToLine(sel); }, [sel, scrollToLine]);
+  useEffect(() => {
+    if (!sel || side !== 'lines') return;
+    if (pendingLineFocus.current === sel) {
+      pendingLineFocus.current = null;
+      listRef.current?.querySelector(`[data-line="${sel}"] textarea`)?.focus({ preventScroll: true });
+    }
+    if (scrollLock.current) { scrollLock.current = false; return; }
+    scrollToLine(sel);
+  }, [sel, side, scrollToLine]);
   const moveLine = useCallback((id, start) => {
     setScript((s) => ({ ...s, [tab]: s[tab].map((l) => (l.id === id ? { ...l, start } : l)) })); setDirty(true);
   }, [tab]);
   const addLine = () => {
     const id = nextLineId(script, tab, track);
+    pendingLineFocus.current = id;
+    scrollLock.current = false;
     setScript((s) => ({ ...s, [tab]: [...s[tab], { id, start: Math.round(editTime * 10) / 10, text: '', ...(track !== MAIN ? { track } : {}) }] }));
     setSel(id); setDirty(true);
   };
@@ -366,39 +386,61 @@ export default function App({ project }) {
     if (!window.confirm(`${id} 대사를 삭제할까요? (생성된 mp3는 남습니다)`)) return;
     setScript((s) => ({ ...s, [tab]: s[tab].filter((l) => l.id !== id) })); setDirty(true);
   };
-  // 보이스·설정·발음 사전은 편집 중인 트랙 것을 바꿈
-  const setVS = (k, v) => { setScript((s) => patchTrackCfg(s, track, 'voice_settings', (x) => ({ ...x, [k]: v }))); setDirty(true); };
-  const setVoice = (k, v) => { setScript((s) => patchTrackCfg(s, track, 'voice', (x) => ({ ...x, [k]: v }))); setDirty(true); };
+  const addVoiceProfile = () => {
+    const id = crypto.randomUUID();
+    setScript((s) => ({ ...s, voiceProfiles: [...s.voiceProfiles, createVoiceProfile(id, '새 보이스', {
+      voice: { language_code: defaultVoice.language_code },
+    })] }));
+    setVoiceProfileSel(id); setDirty(true);
+  };
+  const editVoiceProfile = (id, update) => {
+    setScript((s) => ({ ...s, voiceProfiles: s.voiceProfiles.map((p) => p.id === id ? update(p) : p) }));
+    setDirty(true);
+  };
+  const setTrackVoice = (id) => {
+    setScript((s) => ({ ...s, trackVoices: { ...s.trackVoices, [track]: id } }));
+    setVoiceProfileSel(id); setDirty(true);
+  };
+  const removeVoiceProfile = (id) => {
+    setScript((s) => ({ ...s, voiceProfiles: s.voiceProfiles.filter((p) => p.id !== id) }));
+    setVoiceProfileSel(''); setDirty(true);
+  };
   const setRules = (fn) => { setScript((s) => patchTrackCfg(s, track, 'pronunciation', (x) => fn(x || []))); setDirty(true); };
 
   // ---------- 트랙 추가·복제·이름·삭제 ----------
   // 첫 추가 때 기본 트랙도 목록에 올림. copyFrom: 대사(시작 시각 포함)를 복제, translated: { 영상키: { 원본id: 번역 } }
   const saveTrack = ({ id, name, copyFrom, copyVoice, translated, language_code }) => {
+    const profileId = crypto.randomUUID();
     setScript((s) => {
       const list = trackList(s);
       if (list.some((t) => t.id === id)) return { ...s, tracks: list.map((t) => (t.id === id ? { ...t, name } : t)) };
-      const base = copyVoice ? trackCfg(s, copyFrom || MAIN) : trackCfg({}, MAIN);
-      const voice = { ...fillVoice(base.voice), ...(language_code ? { language_code } : {}) };
-      const t = { id, name, voice, voice_settings: { ...DEFAULT_VS, ...base.voice_settings }, pronunciation: translated ? [] : [...(base.pronunciation || [])] };
-      const n = { ...s, tracks: [...list, t] };
+      const source = copyFrom || MAIN;
+      const base = copyVoice ? resolveVoiceProfile(s, source) : {};
+      const voice = { ...base.voice, ...(language_code ? { language_code } : {}) };
+      const profile = createVoiceProfile(profileId, `${name} 보이스`, { ...base, voice });
+      const pronunciation = copyVoice && !translated ? trackCfg(s, source).pronunciation : [];
+      const n = { ...s, tracks: [...list, { id, name, pronunciation }], voiceProfiles: [...s.voiceProfiles, profile],
+        trackVoices: { ...s.trackVoices, [id]: profileId } };
       if (copyFrom) for (const k of s.videos || []) {
         const add = [];
         for (const l of (s[k] || []).filter((x) => trackOf(x) === copyFrom).sort((a, b) => a.start - b.start)) {
           add.push({ id: nextLineId({ [k]: add }, k, id), start: l.start, text: translated?.[k]?.[l.id] ?? l.text, track: id,
-            ...(!translated && l.tts ? { tts: l.tts } : {}) });
+            ...(!translated && l.tts ? { tts: l.tts } : {}),
+            ...(!translated && copyVoice && l.voiceProfileId ? { voiceProfileId: l.voiceProfileId } : {}) });
         }
         n[k] = [...(s[k] || []), ...add];
       }
       return n;
     });
-    setTrackSel(id); setDirty(true);
+    setTrackSel(id); setVoiceProfileSel(''); setDirty(true);
   };
   const deleteTrack = (id) => {
     if (id === MAIN) return;
     const n = (script.videos || []).reduce((c, k) => c + (script[k] || []).filter((l) => trackOf(l) === id).length, 0);
     if (!window.confirm(`'${tracks.find((t) => t.id === id)?.name}' 트랙과 대사 ${n}줄을 지울까요? (생성된 mp3는 남습니다)`)) return;
     setScript((s) => {
-      const o = { ...s, tracks: s.tracks.filter((t) => t.id !== id) };
+      const trackVoices = { ...s.trackVoices }; delete trackVoices[id];
+      const o = { ...s, tracks: s.tracks.filter((t) => t.id !== id), trackVoices };
       for (const k of s.videos || []) o[k] = (s[k] || []).filter((l) => trackOf(l) !== id);
       if (o.exports) o.exports = o.exports.filter((c) => c.audio !== id && c.subs !== id);
       return o;
@@ -420,14 +462,17 @@ export default function App({ project }) {
   };
 
   const save = useCallback(async (s = script) => {
-    await api('/api/script', { method: 'PUT', body: JSON.stringify(s, null, 2), headers: { 'Content-Type': 'application/json' } });
-    setDirty(false); say('script.json 저장됨', 'ok');
+    savesInProgress.current++;
+    try {
+      await api('/api/script', { method: 'PUT', body: JSON.stringify(s, null, 2), headers: { 'Content-Type': 'application/json' } });
+      setDirty(false); say('프로젝트 저장됨', 'ok');
+    } finally { savesInProgress.current--; }
   }, [script, say]);
 
   useEffect(() => {
-    const h = (e) => { if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); save().catch((er) => say(er.message, 'err')); } };
+    const h = (e) => { if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); if (!phome && !closingProject) save().catch((er) => say(er.message, 'err')); } };
     window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h);
-  }, [save, say]);
+  }, [save, say, phome, closingProject]);
   useEffect(() => {
     const h = (e) => { if (dirty) { e.preventDefault(); e.returnValue = ''; } };
     window.addEventListener('beforeunload', h); return () => window.removeEventListener('beforeunload', h);
@@ -448,7 +493,9 @@ export default function App({ project }) {
 
   const generate = async (l, all = lines) => {
     const i = all.findIndex((x) => x.id === l.id);
-    const { voice: v, voice_settings: vs } = cfgOf(l);
+    const profile = profileOf(l);
+    const { voice: v, voice_settings: vs } = profile;
+    const neighborText = (neighbor) => context && neighbor && profileOf(neighbor).id === profile.id ? ttsText(neighbor) : undefined;
     setBusy((b) => ({ ...b, [l.id]: 'gen' }));
     try {
       await api(`/api/tts/${l.id}`, {
@@ -457,8 +504,8 @@ export default function App({ project }) {
           text: sendText(l), subtitle: l.text, voice_id: v.voice_id, model_id: v.model_id,
           voice_settings: pickVS(vs, v.model_id),
           language_code: modelCaps(v.model_id).lang ? v.language_code || undefined : undefined,
-          previous_text: context && all[i - 1] ? ttsText(all[i - 1]) : undefined,
-          next_text: context && all[i + 1] ? ttsText(all[i + 1]) : undefined,
+          previous_text: neighborText(all[i - 1]),
+          next_text: neighborText(all[i + 1]),
         }),
       });
       setBusy((b) => ({ ...b, [l.id]: null }));
@@ -472,23 +519,28 @@ export default function App({ project }) {
   };
 
   const genOne = async (l) => {
-    if (!preflight()) return;
+    if (!preflight([l])) return;
     if (dirty) await save();
     await generate(l); await refreshTts();
   };
 
-  const preflight = () => {
+  const preflight = (targets) => {
     if (!apiKey) { say('설정에서 ElevenLabs API 키를 등록하세요', 'err'); setModal('settings'); return false; }
-    if (!cfg.voice.voice_id) { say(`'${tracks.find((t) => t.id === track)?.name}' 트랙의 보이스를 선택하세요`, 'err'); return false; }
+    const missing = targets.find((l) => !profileOf(l).voice.voice_id);
+    if (missing) {
+      setVoiceProfileSel(profileOf(missing).id); setSide('voice');
+      say(`${missing.id} 대사의 보이스를 설정하세요`, 'err');
+      return false;
+    }
     return true;
   };
 
   const runBatch = async (scope, onlyMissing) => {
-    if (!preflight()) return;
     const keys = scope === 'all' ? [...(script.videos || [])] : [tab];
     const targets = keys.flatMap((k) => script[k].filter((l) => trackOf(l) === track).sort((a, b) => a.start - b.start).map((l, _, arr) => ({ l, arr })))
       .filter(({ l }) => ttsText(l).trim() && (!onlyMissing || statusOf(l) !== 'ok'));
     if (!targets.length) { say('생성할 대사가 없습니다', 'ok'); return; }
+    if (!preflight(targets.map(({ l }) => l))) return;
     const chars = targets.reduce((n, { l }) => n + sendText(l).length, 0);
     if (!window.confirm(`${targets.length}개 대사, 약 ${chars}자를 생성합니다. 진행할까요?`)) return;
     if (dirty) await save();
@@ -556,7 +608,7 @@ export default function App({ project }) {
       if (edit >= T2.total || (s.stopAt != null && edit >= s.stopAt)) { setEditTime(Math.min(edit, T2.total)); stop(); return; }
       L2.forEach((l) => { if (!s.started.has(l.id) && l.start <= edit) { s.started.add(l.id); startLine(l, edit - l.start); } });
       const speaking = Object.values(audios.current).some(({ el }) => !el.paused && !el.ended);
-      // 엔딩 직전 게임 소리 페이드아웃 (내보내기 설정과 동일)
+      // 엔딩 직전 원본 소리 페이드아웃 (내보내기 설정과 동일)
       let ef = 3; try { ef = +JSON.parse(localStorage.getItem('zk.export') || '{}').endFade || 3; } catch {}
       const fadeK = Math.max(0, Math.min(1, (T2.body - edit) / ef));
       v.volume = Math.min(1, (speaking ? gv * 0.3 : gv) * fadeK);
@@ -779,20 +831,23 @@ export default function App({ project }) {
       edit_end: +((tl.parts[i]?.off ?? 0) + (tl.parts[i]?.dur ?? 0)).toFixed(1) }));
     const L = lines.map((l) => {
       const info = tts[l.id]; const real = info && durs[`${l.id}@${info.mtime}`];
+      const voice = profileOf(l).voice;
       return { id: l.id, start: l.start, end: +(l.start + durOf(l)).toFixed(1), dur_source: real ? 'mp3' : 'estimate',
+        ...(l.voiceProfileId && { voice_override: { model: voice.model_id, language: voice.language_code, tone: toneOf(voice) } }),
         text: l.text, tts_custom: l.tts || '', tts_effective: ttsText(l), status: statusOf(l), warning: warnings[l.id] || undefined };
     });
     const act = lines.find((l) => editTime >= l.start && editTime < l.start + durOf(l) + SUB_TAIL);
     return [
-      `편집 중인 나레이션 트랙: ${tracks.find((t) => t.id === track)?.name} (언어 코드 ${cfg.voice.language_code || '미지정'}). 자막·발음 텍스트는 이 트랙의 언어로 쓴다. 다른 트랙의 대사는 건드리지 않는다.`,
+      `편집 중인 나레이션 트랙: ${tracks.find((t) => t.id === track)?.name} (언어 코드 ${defaultVoice.language_code || '미지정'}). 자막·발음 텍스트는 이 트랙의 언어로 쓴다. 다른 트랙의 대사는 건드리지 않는다.`,
       '나레이션 톤: 프로젝트 설명의 톤을 따른다. 화면/대본에서 알 수 없는 내용은 단정하지 말고 추측이라고 밝힐 것.',
       '대사 편집 규칙 (op=update/add/delete/rule_add/rule_remove)',
       '- text = 화면 자막(표기 그대로, 영어 고유명사 허용). 한 줄 약 30자, 최대 2줄 권장.',
       '- tts = TTS 발음 텍스트. 비어 있으면 발음 사전이 자막에 적용된 값이 쓰인다. 반복되는 표기는 rule_add로 사전에 넣고, 한 줄만 다른 경우에만 tts를 쓴다. tts를 자동으로 되돌리려면 빈 문자열.',
-      `- TTS 모델: ${cfg.voice.model_id}. ${modelCaps(cfg.voice.model_id).tags ? 'SSML 미지원, 대신 tts 안에 [excited] [whispers] 같은 오디오 태그 사용 가능(자막에는 넣지 말 것).' : 'SSML/오디오 태그 사용 금지.'} ${(cfg.voice.language_code || 'ko') === 'ko' ? '영문 약어·숫자·기호는 tts에서 한글 읽기로.' : '약어·숫자·기호는 tts에서 그 언어로 읽는 법으로.'}`,
-      toneTags ? `- 기본 톤 태그 ${toneTags} 가 모든 발음 텍스트 앞에 자동으로 붙는다(줄 tts가 태그로 시작하면 ${cfg.voice.tone.override ? '그 줄은 기본 톤 대신 자체 태그 사용' : '기본 톤 뒤에 추가'}). 같은 태그를 tts에 중복해서 넣지 말 것. 특정 줄만 톤을 바꾸고 싶을 때만 tts 앞에 태그.` : '- 기본 톤 태그 없음.',
+      `- TTS 모델: ${defaultVoice.model_id}. ${modelCaps(defaultVoice.model_id).tags ? 'SSML 미지원, 대신 tts 안에 [excited] [whispers] 같은 오디오 태그 사용 가능(자막에는 넣지 말 것).' : 'SSML/오디오 태그 사용 금지.'} ${(defaultVoice.language_code || 'ko') === 'ko' ? '영문 약어·숫자·기호는 tts에서 한글 읽기로.' : '약어·숫자·기호는 tts에서 그 언어로 읽는 법으로.'}`,
+      toneTags ? `- 기본 보이스의 톤 태그 ${toneTags}는 발음 텍스트 앞에 자동으로 붙는다. 같은 태그를 tts에 중복해서 넣지 말 것.` : '- 기본 보이스의 톤 태그 없음.',
+      '- voice_override가 있는 줄에는 그 줄의 보이스 모델·언어·톤을 적용한다.',
       '- TTS 속도: 한국어 약 초당 7자, 영어 약 초당 2.5단어. 대사 end + 0.3초 < 다음 대사 start 가 되도록. start는 편집본 기준 초(0.1 단위).',
-      `- 편집본 길이 ${tl.total.toFixed(1)}초, ${tl.body.toFixed(1)}초부터 엔딩 카드(검은 화면). 첫 5.6초는 타이틀 카드가 화면을 덮는다.`,
+      `- 편집본 길이 ${tl.total.toFixed(1)}초, ${tl.body.toFixed(1)}초부터 엔딩 카드(검은 화면).`,
       '',
       `현재 영상: ${tab} = ${meta?.title}`,
       chapters.length ? `챕터(편집본 시각): ${JSON.stringify(chapters)}` : '챕터 없음',
@@ -841,23 +896,76 @@ export default function App({ project }) {
     try { await save(next); say('영상을 프로젝트에서 뺐습니다', 'ok'); } catch (e) { say(e.message, 'err'); }
   };
   const setProject = (patch) => { setScript((x) => ({ ...x, project: { ...(x.project || {}), ...patch } })); setDirty(true); };
+  const finishProjectPrompt = (choice) => {
+    projectPrompt.resolve(choice);
+    setProjectPrompt(null);
+  };
+  const prepareProjectChange = async () => {
+    if (savesInProgress.current || T.saving || T.busy || Object.values(busy).includes('gen')
+      || (batch && batch.done < batch.total) || (exportJob && !exportJob.finished)) {
+      throw new Error('진행 중인 저장, 생성 또는 내보내기가 끝난 뒤 프로젝트를 전환하세요.');
+    }
+    stop();
+    if (dirty) {
+      const choice = await new Promise((resolve) => setProjectPrompt({ resolve }));
+      if (choice === 'cancel') return false;
+      if (choice === 'save') await save();
+    }
+    await T.flushPending();
+    return true;
+  };
+  const closeProject = async () => {
+    setClosingProject(true);
+    try {
+      if (!await prepareProjectChange()) return;
+      await api('/api/projects/close', { method: 'POST' });
+      onProjectChange(null);
+    } catch (e) { say(e.message, 'err'); }
+    finally { setClosingProject(false); }
+  };
+  const projectAction = (action) => {
+    projectMenuRef.current.open = false;
+    action();
+  };
   const projectModals = (<>
     {vmodal && <VideoModal vkey={vmodal.key} meta={vmodal.key ? script.meta[vmodal.key] : null} isNew={!!vmodal.isNew} say={say}
       onSave={(m) => saveVideo(m, vmodal.isNew ? null : vmodal.key)} onDelete={() => deleteVideo(vmodal.key)} onClose={() => setVmodal(null)} />}
-    {phome && <ProjectHome asModal onClose={() => setPhome(false)} />}
+    {phome && <ProjectHome initialView={phome} beforeOpen={prepareProjectChange} onOpened={onProjectChange} onClose={() => setPhome(null)} />}
+    {projectPrompt && <Modal title="프로젝트 변경사항 저장" onClose={() => finishProjectPrompt('cancel')}
+      footer={<>
+        <button autoFocus onClick={() => finishProjectPrompt('cancel')}>취소</button>
+        <button onClick={() => finishProjectPrompt('discard')}>저장하지 않음</button>
+        <button className="primary" onClick={() => finishProjectPrompt('save')}>저장 후 계속</button>
+      </>}>
+      <p className="project-prompt">‘{script.project?.name || project.name}’의 변경사항을 저장하고 계속할까요?</p>
+    </Modal>}
     {tmodal && <TrackModal mode={tmodal.mode} track={tracks.find((t) => t.id === tmodal.id)} tracks={tracks} current={track}
       onSave={(t) => { saveTrack(t); setTmodal(null); }} onDelete={deleteTrack} onTranslate={translateTrack}
       aiReady={!!keys[ai.provider]} onClose={() => setTmodal(null)} say={say} />}
     {modal === 'project' && <ProjectSettings project={script.project || {}} onChange={setProject} dirty={dirty} onSave={() => save()} onClose={() => setModal(null)} say={say} />}
+    {modal === 'references' && <ReferenceLibrary references={references} loadError={referencesError}
+      onSave={saveProjectReferences} onReload={loadProjectReferences} onClose={() => setModal(null)} />}
   </>);
   const headerEl = (
       <header>
-        <div className="brand">
-          <button className="projbtn" title="프로젝트 전환·새로 만들기" onClick={() => setPhome(true)}><b>{script.project?.name || project?.name || '프로젝트'}</b><i>▾</i></button>
-          <span>TTS STUDIO</span>
-          <button className="ghost sm" title="프로젝트 설정 (브랜드 문구·설명·출력 폴더)" onClick={() => setModal('project')}>프로젝트 설정</button>
+        <div className="project-bar">
+          <span className="app-name">{APP_NAME}</span>
+          <details className="project-menu" ref={projectMenuRef}
+            onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) e.currentTarget.open = false; }}
+            onKeyDown={(e) => { if (e.key === 'Escape') { e.currentTarget.open = false; e.currentTarget.querySelector('summary').focus(); } }}>
+            <summary>프로젝트 <span aria-hidden="true">▾</span></summary>
+            <div className="project-menu-items">
+              <button onClick={() => projectAction(() => setPhome('new'))}>새 프로젝트</button>
+              <button onClick={() => projectAction(() => setPhome('open'))}>폴더에서 열기</button>
+              <button onClick={() => projectAction(() => setPhome('list'))}>최근 프로젝트</button>
+              <button onClick={() => projectAction(() => setModal('project'))}>프로젝트 설정</button>
+              <button disabled={closingProject} onClick={() => projectAction(closeProject)}>프로젝트 닫기</button>
+            </div>
+          </details>
+          <span className="project-caption" title={script.project?.name}>{script.project?.name || project?.name || '프로젝트'}</span>
         </div>
         <div className="cred">
+          <button className="references-button" onClick={() => setModal('references')}>프로젝트 자료{references?.length > 0 && <small>{references.length}</small>}</button>
           {quota && <span className="quota" title="ElevenLabs 사용량">TTS {quota.used?.toLocaleString()} / {quota.limit?.toLocaleString()}자</span>}
           {!apiKey && <button className="accent" onClick={() => setModal('settings')}>API 키 등록 필요</button>}
           {apiKey && !voices.length && <button className="ghost" onClick={() => loadVoices()}>보이스 불러오기</button>}
@@ -865,7 +973,7 @@ export default function App({ project }) {
             onClick={() => dirty && save().catch((e) => say(e.message, 'err'))}>{dirty ? '● 저장' : '✓ 저장됨'}</button>
           {toast && <button className={`toast ${toast.kind}`} title="설정 → 로그에서 전체 보기" onClick={() => { setSetFocus('log'); setModal('settings'); setToast(null); }}>{toast.msg}</button>}
           <button onClick={() => { setSetFocus(unreadErr ? 'log' : null); setModal('settings'); }}>⚙ 설정{unreadErr > 0 && <i className="errbadge" title="확인하지 않은 오류">{unreadErr}</i>}</button>
-          <button className="primary export-btn" onClick={() => setModal('export')}>
+          <button className="primary export-btn" disabled={!script.videos.length} onClick={() => setModal('export')}>
             {exportJob && !exportJob.finished
               ? `내보내는 중 ${Math.round(((exportJob.items.reduce((n, x) => n + (x.status === 'done' ? 1 : x.progress || 0), 0)) / exportJob.items.length) * 100)}%`
               : '⬇ MP4 내보내기'}
@@ -879,9 +987,12 @@ export default function App({ project }) {
       <div className="app">
         {headerEl}
         <div className="empty-proj">
-          <h2>{script.project?.name}</h2>
-          <p className="muted">아직 영상이 없습니다. 작업할 영상을 추가하세요. 원본 파일은 복사하지 않고 그 위치를 그대로 씁니다.</p>
-          <button className="primary" onClick={() => setVmodal({ isNew: true })}>＋ 영상 추가</button>
+          <h2>첫 영상을 가져오세요</h2>
+          <p className="muted">영상과 기획 메모, 참고 이미지를 이 작업 공간에 모아 편집하세요.</p>
+          <div className="reference-actions">
+            <button className="primary" onClick={() => setVmodal({ isNew: true })}>＋ 영상 가져오기</button>
+            <button onClick={() => setModal('references')}>자료 추가</button>
+          </div>
         </div>
         {projectModals}
         {modal === 'settings' && <SettingsModal keys={keys} setKey={setKey} remember={remember} setRemember={setRemember} ai={ai} setAi={setAiCfg}
@@ -895,29 +1006,33 @@ export default function App({ project }) {
   const chapter = (meta?.chapters || []).map((c, i) => ({ ...c, at: tl.parts[i]?.off ?? 0 }))
     .filter((c) => editTime >= c.at && editTime < c.at + 6).pop();
   const counts = lines.reduce((m, l) => { const s = statusOf(l); m[s] = (m[s] || 0) + 1; return m; }, {});
-  const todoChars = lines.filter((l) => statusOf(l) !== 'ok').reduce((n, l) => n + sendText(l).length, 0);
-  const caps = modelCaps(cfg.voice.model_id);
-  const modelList = models.some((m) => m.model_id === cfg.voice.model_id) ? models
-    : [{ model_id: cfg.voice.model_id, name: cfg.voice.model_id }, ...models];
-  const voiceName = voices.find((v) => v.voice_id === cfg.voice.voice_id)?.name;
+  const generatableLines = lines.filter((l) => ttsText(l).trim());
+  const todoChars = generatableLines.filter((l) => statusOf(l) !== 'ok').reduce((n, l) => n + sendText(l).length, 0);
+  const activeTrackName = tracks.find((t) => t.id === track)?.name;
+  const agentThread = JSON.stringify([tab, track]);
+  const threadState = agentThreads[agentThread];
+  const updateAgentThread = (update) => setAgentThreads((threads) => ({ ...threads,
+    [agentThread]: { ...threads[agentThread], ...update(threads[agentThread] || {}) } }));
+  const activeReferences = references?.filter((item) => item.enabled).length || 0;
 
   return (
     <div className="app">
       {headerEl}
 
-      <div className="layout" style={{ gridTemplateColumns: `minmax(380px, 1fr) 6px ${lay.mid}px ${asstOpen ? `6px ${lay.asst}px` : '44px'}` }}>
+      <div className={`layout ${asstOpen ? 'with-assistant' : ''}`} style={{ '--editor-width': `${lay.mid}px`, '--assistant-width': `${lay.asst}px` }}>
         <section className="left">
-          <nav className="tabs">
-            {script.videos.map((k) => (
-              <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)} onDoubleClick={() => setVmodal({ key: k })} title="더블클릭: 영상 설정">
-                {script.meta[k]?.title || k}<small>{(script[k] || []).filter((l) => trackOf(l) === track).length}</small>
-                {tab === k && <i className="vset" title="영상 설정 (파일·구간·챕터)" onClick={(e) => { e.stopPropagation(); setVmodal({ key: k }); }}>⚙</i>}
-              </button>
-            ))}
-            <button className="addvid" title="영상 추가" onClick={() => setVmodal({ isNew: true })}>＋ 영상</button>
-            <span className="grow" />
-            <span className="len">편집본 {fmt(tl.total)}</span>
-          </nav>
+          <div className="preview-bar">
+            <nav className="tabs" aria-label="프로젝트 영상">
+              {script.videos.map((k) => (
+                <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)} onDoubleClick={() => setVmodal({ key: k })} title="더블클릭: 영상 설정">
+                  {script.meta[k]?.title || k}<small>{(script[k] || []).filter((l) => trackOf(l) === track).length}</small>
+                  {tab === k && <i className="vset" title="영상 설정 (파일·구간·챕터)" onClick={(e) => { e.stopPropagation(); setVmodal({ key: k }); }}>⚙</i>}
+                </button>
+              ))}
+              <button className="addvid" onClick={() => setVmodal({ isNew: true })}>＋ 영상 추가</button>
+            </nav>
+            {side !== 'thumbs' && <button className="sm render-check" title="내보내기와 동일한 방식으로 현재 프레임 렌더" onClick={renderShot}>실제 렌더 확인</button>}
+          </div>
 
           {side === 'thumbs' && (
             <div className="thumbwork">
@@ -933,9 +1048,9 @@ export default function App({ project }) {
               )}
             </div>
           )}
-          <div className="videowork" style={{ display: side === 'thumbs' ? 'none' : undefined }}>
+          <div className={`videowork ${side === 'cards' ? 'has-inspector' : ''}`} hidden={side === 'thumbs'}>
           <div className="stagewrap">
-          <div className="stage" ref={stageRef} style={lay.stageH ? { width: `min(100%, ${(lay.stageH * 16) / 9}px)` } : undefined}>
+          <div className="stage" ref={stageRef} style={lay.stageH ? { '--preview-height': `${lay.stageH}px` } : undefined}>
             <video ref={videoRef} src={`/api/video/${tab}`} preload="metadata" onTimeUpdate={onVideoTime}
               onClick={() => (playing ? stop() : startPlay(editTime))} />
             <FrameOverlay rect={frameRect} t={editTime} st={clientStyle} fontsReady={fontsVer} fontsList={fontsList} fallbackFont={font}
@@ -950,116 +1065,32 @@ export default function App({ project }) {
             )}
           </div>
 
-          <Timeline tl={tl} lines={lines} trackName={tracks.length > 1 ? tracks.find((t) => t.id === track)?.name : null} durOf={durOf} statusOf={statusOf} warnings={warnings} playing={playing}
-            editTime={editTime} sel={sel} onSeek={seek} onSel={(l, keep) => { setSel(l.id); if (!keep) seek(Math.max(0, l.start - 0.5)); }}
-            onMove={moveLine} onDragStart={stop} onDrop={(id) => scrollToLine(id)}
-            chapters={meta?.chapters || []} insts={insts} thumbs={T.list.filter((d) => d.key === tab)}
-            onCardClick={(inst) => { setSide('cards'); C.setKind(inst.kind); focusCard(inst); }}
-            onCardDragStart={(inst) => { if (inst.kind === 'intro') C.beginGesture(); }}
-            onCardMove={(inst, a) => {
-              if (inst.kind === 'intro') C.updateCard('intro', { start: a }, { commit: false });
-              else if (inst.kind === 'chapter') setMeta((m) => ({ ...m, chapters: (m.chapters || []).map((c, i) => (i === inst.idx ? { ...c, cardAt: Math.round((a - (tl.parts[i]?.off ?? 0)) * 100) / 100 } : c)) }));
-            }}
-            onThumbClick={(d) => { setSide('thumbs'); T.select(d.id); }} />
-
-          <div className="transport">
-            <button className="primary" onClick={() => (playing ? stop() : startPlay(editTime))}>{playing ? '■ 정지' : '▶ 편집본 재생'}</button>
-            <button onClick={() => seek(0)}>⏮ 처음</button>
-            <span className="tc">{fmt(editTime)} <small>/ {fmt(tl.total)}</small></span>
-            <button title="현재 위치를 최종 내보내기와 똑같이(ffmpeg + 자막) 한 프레임 렌더해서 비교" onClick={renderShot}>🎞 실제 렌더 확인</button>
-            <span className="grow" />
-            <label className="field inline"><span>게임 볼륨</span>
-              <input type="range" min="0" max="1" step="0.05" value={gameVol} onChange={(e) => setGameVol(+e.target.value)} /></label>
-          </div>
           <Splitter axis="y" getStart={() => stageRef.current?.clientHeight || 400}
             onDrag={(d, v) => setL('stageH', clamp(v + d, 160, 1400))} onReset={() => setL('stageH', null)} />
           </div>
 
           {side === 'cards' && <CardInspector C={C} st={clientStyle} fontsList={fontsList} onInstallFont={installFont} />}
-          {side !== 'cards' && (<>
-          <Section id="voice" title={tracks.length > 1 ? `보이스 · ${tracks.find((t) => t.id === track)?.name}` : '보이스'} className="voice" defaultOpen={!cfg.voice.voice_id}
-            summary={`${voiceName || (cfg.voice.voice_id ? cfg.voice.voice_id.slice(0, 8) + '…' : '미선택')} · ${modelList.find((m) => m.model_id === cfg.voice.model_id)?.name || cfg.voice.model_id}${toneTags ? ` · 톤 ${toneTags}` : ''}`}>
-            <div className="row">
-              <label className="field grow"><span>Voice {voiceName ? `· ${voiceName}` : ''}</span>
-                {voices.length ? (
-                  <select value={cfg.voice.voice_id} onChange={(e) => setVoice('voice_id', e.target.value)}>
-                    <option value="">선택…</option>
-                    {voices.map((v) => (
-                      <option key={v.voice_id} value={v.voice_id}>
-                        {v.name} {[v.labels.language, v.labels.gender, v.labels.accent, v.category].filter(Boolean).join(' · ')}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <input value={cfg.voice.voice_id} placeholder="Voice ID 직접 입력 또는 ‘보이스 불러오기’" onChange={(e) => setVoice('voice_id', e.target.value.trim())} />
-                )}
-              </label>
-              {voices.find((v) => v.voice_id === cfg.voice.voice_id)?.preview_url && (
-                <button onClick={() => new Audio(voices.find((v) => v.voice_id === cfg.voice.voice_id).preview_url).play()}>샘플 ▶</button>
-              )}
-              <label className="field"><span>Model</span>
-                <select value={cfg.voice.model_id} onChange={(e) => setVoice('model_id', e.target.value)}>
-                  {modelList.map((m) => <option key={m.model_id} value={m.model_id}>{m.name}</option>)}
-                </select>
-              </label>
-              {caps.lang && (
-                <label className="field lang"><span>언어</span>
-                  <input value={cfg.voice.language_code || ''} placeholder="ko" onChange={(e) => setVoice('language_code', e.target.value.trim())} />
-                </label>
-              )}
-            </div>
-            <div className="sliders">
-              {[['stability', '안정성', 0, 1], ['similarity_boost', '유사도', 0, 1], ['style', '스타일 과장', 0, 1], ['speed', '속도', 0.7, 1.2]]
-                .filter(([k]) => caps.keys.includes(k)).map(([k, n, a, b]) => (
-                  <label key={k} className="field"><span>{n} <b>{Number(cfg.voice_settings[k]).toFixed(2)}</b></span>
-                    <input type="range" min={a} max={b} step="0.05" value={cfg.voice_settings[k]} onChange={(e) => setVS(k, +e.target.value)} />
-                  </label>
-                ))}
-              <div className="checks">
-                {caps.keys.includes('use_speaker_boost') && (
-                  <label className="chk"><input type="checkbox" checked={!!cfg.voice_settings.use_speaker_boost} onChange={(e) => setVS('use_speaker_boost', e.target.checked)} />Speaker boost</label>
-                )}
-                <label className="chk" title="앞뒤 대사의 발음 텍스트를 함께 보내 억양을 자연스럽게 이어줌"><input type="checkbox" checked={context} onChange={(e) => setContext(e.target.checked)} />앞뒤 문맥 연결</label>
-              </div>
-              {caps.tags ? (
-                <ToneEditor tone={cfg.voice.tone} onChange={(t) => setVoice('tone', { ...cfg.voice.tone, ...t })}
-                  sample={(lines.find((l) => l.id === sel) || lines[0]) ? sendText(lines.find((l) => l.id === sel) || lines[0]) : ''} />
-              ) : (
-                <p className="hint">기본 톤(오디오 태그)은 Eleven v3/v4 모델에서만 쓸 수 있습니다.</p>
-              )}
-            </div>
-          </Section>
-
-          <Section id="dict" title={tracks.length > 1 ? `발음 사전 · ${tracks.find((t) => t.id === track)?.name}` : '발음 사전'} className="dict"
-            summary={`규칙 ${cfg.pronunciation.length}개 · 자막 → 발음 자동 치환 (발음 칸이 비어 있을 때)`}>
-            <div className="rules">
-              {cfg.pronunciation.map((r, i) => (
-                <div key={i} className="rule">
-                  <input value={r.from} placeholder="자막 표기" onChange={(e) => setRules((rs) => rs.map((x, j) => (j === i ? { ...x, from: e.target.value } : x)))} />
-                  <span>→</span>
-                  <input value={r.to} placeholder="읽는 법" onChange={(e) => setRules((rs) => rs.map((x, j) => (j === i ? { ...x, to: e.target.value } : x)))} />
-                  <span className="muted">{lines.filter((l) => r.from && !l.tts?.trim() && l.text.includes(r.from)).length}줄</span>
-                  <button className="ghost" onClick={() => setRules((rs) => rs.filter((_, j) => j !== i))}>✕</button>
-                </div>
-              ))}
-            </div>
-            <button onClick={() => setRules((rs) => [...rs, { from: '', to: '' }])}>+ 규칙 추가</button>
-          </Section>
-
-          </>)}
           </div>
         </section>
 
-        <Splitter axis="x" getStart={() => lay.mid} onDrag={(d, v) => setL('mid', clamp(v - d, 300, 1100))} onReset={() => setL('mid', LAYOUT0.mid)} />
+        <Splitter axis="x" getStart={() => lay.mid} onDrag={(d, v) => setL('mid', clamp(v - d, 300, 1100))} onReset={() => setL('mid', DEFAULT_LAYOUT.mid)} />
         <section className="right">
           <nav className="sidetabs">
             <button className={side === 'lines' ? 'on' : ''} onClick={() => setSide('lines')}>대사 <small>{lines.length}</small></button>
+            <button className={side === 'voice' ? 'on' : ''} onClick={() => setSide('voice')}>보이스</button>
             <button className={side === 'style' ? 'on' : ''} onClick={() => setSide('style')}>자막 스타일</button>
             <button className={side === 'cards' ? 'on' : ''} onClick={() => { setSide('cards'); const i = insts.find((x) => x.kind === C.kind && (C.kind !== 'chapter' || x.idx === C.chIdx)); if (i && !(editTime >= i.a && editTime < i.b)) focusCard(i); }}>카드</button>
             <button className={side === 'thumbs' ? 'on' : ''} onClick={() => { setSide('thumbs'); stop(); }}>썸네일 <small>{T.list.filter((d) => d.key === tab).length}</small></button>
             <button className={side === 'youtube' ? 'on' : ''} onClick={() => setSide('youtube')} title="유튜브 업로드용 제목·설명·태그">업로드</button>
           </nav>
-          {side === 'style' ? (
+          {side === 'voice' ? (
+            <VoicePanel tracks={tracks} track={track} onTrackChange={selectTrack} profiles={script.voiceProfiles}
+              defaultId={defaultProfile.id} onDefaultChange={setTrackVoice} selectedId={voiceProfileSel} onSelect={setVoiceProfileSel}
+              onAdd={addVoiceProfile} onEdit={editVoiceProfile} onRemove={removeVoiceProfile}
+              inUse={(id) => Object.values(script.trackVoices || {}).includes(id) || script.videos.some((k) => script[k].some((l) => l.voiceProfileId === id))}
+              voices={voices} models={models} context={context} setContext={setContext} rules={cfg.pronunciation} setRules={setRules}
+              lines={lines} sample={ttsText(lines.find((l) => l.id === sel) || lines[0] || {})} />
+          ) : side === 'style' ? (
             <div className="sidescroll"><StylePanel sample={`${script.project?.brand || ''} ${script.project?.tagline || ''} 가나다 123`.trim()} style={script.style} setStyle={setStyle} installed={fontsList} onInstall={installFont} installing={installing} /></div>
           ) : side === 'youtube' ? (
             <YoutubePanel meta={meta} setMeta={setMeta} tl={tl} tab={tab} ai={ai} aiKey={keys[ai.provider]} onOpenSettings={() => setModal('settings')}
@@ -1069,27 +1100,34 @@ export default function App({ project }) {
           ) : side === 'thumbs' ? (
             <ThumbsSide T={T} tab={tab} editTime={editTime} ai={ai} aiKey={keys[ai.provider]} onOpenSettings={() => setModal('settings')} />
           ) : (<>
-          <div className="trackbar" title="나레이션 트랙: 트랙마다 대사·타이밍·보이스·발음 사전이 따로 있음. 내보낼 때 음성·자막 트랙을 골라 조합">
-            <span className="muted">트랙</span>
-            {tracks.map((t) => (
-              <button key={t.id} className={`chip ${track === t.id ? 'on' : ''}`} onClick={() => { stop(); setSel(null); setTrackSel(t.id); }}
-                onDoubleClick={() => setTmodal({ mode: 'edit', id: t.id })}>
-                {t.name}<small>{(script[tab] || []).filter((l) => trackOf(l) === t.id).length}</small>
-                {track === t.id && <i className="vset" title="트랙 이름·삭제" onClick={(e) => { e.stopPropagation(); setTmodal({ mode: 'edit', id: t.id }); }}>⚙</i>}
-              </button>
-            ))}
-            <button className="ghost sm" title="트랙 추가 (빈 트랙 / 복제 / AI 번역)" onClick={() => setTmodal({ mode: 'add' })}>＋ 트랙</button>
+          <div className="trackbar">
+            <div className="trackbar-head">
+              <h2>나레이션 트랙</h2>
+              <button className="ghost sm" onClick={() => setTmodal({ mode: 'add' })}>＋ 트랙 추가</button>
+            </div>
+            <div className="trackbar-controls">
+              <div className="tracklist" role="group" aria-label="나레이션 트랙 선택" ref={trackListRef}>
+                {tracks.map((t) => (
+                  <button key={t.id} className={`chip ${track === t.id ? 'on' : ''}`} aria-pressed={track === t.id}
+                    title={t.name} onClick={() => selectTrack(t.id)}
+                    onDoubleClick={() => setTmodal({ mode: 'edit', id: t.id })}>
+                    <span>{t.name}</span><small>{(script[tab] || []).filter((l) => trackOf(l) === t.id).length}줄</small>
+                  </button>
+                ))}
+              </div>
+              <button className="track-settings sm" aria-label={`${activeTrackName} 트랙 설정`} onClick={() => setTmodal({ mode: 'edit', id: track })}>⚙ 설정</button>
+            </div>
           </div>
+          {lines.length > 0 ? (<>
           <div className="listhead">
             <div className="stats">
               <span className="s-ok">완료 {counts.ok || 0}</span>
               <span className="s-stale">변경 {(counts.stale || 0) + (counts.voice || 0)}</span>
-              <span className="s-none">없음 {counts.none || 0}</span>
-              <span className="muted">생성 필요 {todoChars}자</span>
+              <span className="s-none">미생성 {counts.none || 0}</span>
             </div>
             <div className="actions">
-              <button onClick={addLine}>+ 대사 (재생 위치)</button>
               <label className="chk" title="재생 중 지금 나오는 대사로 목록을 자동 스크롤"><input type="checkbox" checked={follow} onChange={(e) => { setFollow(e.target.checked); ls.set('zk.follow', e.target.checked ? '1' : '0'); }} />재생 따라가기</label>
+              <button className="accent sm" onClick={addLine} title="현재 재생 위치에 대사 추가">＋ 대사 추가</button>
             </div>
           </div>
 
@@ -1097,22 +1135,24 @@ export default function App({ project }) {
             {lines.map((l) => {
               const st = statusOf(l); const d = durOf(l); const real = !!(tts[l.id] && durs[`${l.id}@${tts[l.id].mtime}`]);
               const b = busy[l.id];
+              const lineTone = toneOf(profileOf(l).voice);
               return (
                 <li key={l.id} data-line={l.id} className={`line ${sel === l.id ? 'sel' : ''} ${active?.id === l.id ? 'live' : ''}`} onClick={() => { scrollLock.current = true; setSel(l.id); }}>
                   <div className="lh">
                     <b className="id">{l.id}</b>
                     <span className={`badge ${st}`}>{{ ok: '생성됨', stale: '대사 변경', voice: '보이스 변경', none: '미생성' }[st]}</span>
-                    <label className="start">
-                      <input type="number" step="0.1" min="0" value={l.start} onChange={(e) => updateLine(l.id, { start: +e.target.value })} />
+                    <div className="start">
+                      <input aria-label="대사 시작 시각(초)" type="number" step="0.1" min="0" value={l.start} onChange={(e) => updateLine(l.id, { start: +e.target.value })} />
                       <button title="현재 재생 위치로" onClick={(e) => { e.stopPropagation(); updateLine(l.id, { start: Math.round(editTime * 10) / 10 }); }}>⌖</button>
-                    </label>
+                    </div>
                     <span className="dur">{real ? '' : '≈'}{d.toFixed(1)}s</span>
-                    <span className="grow" />
-                    <button title="편집본 위에서 미리보기" onClick={(e) => { e.stopPropagation(); previewLine(l); }}>▶ 영상</button>
-                    <button title="음성만 듣기" disabled={!tts[l.id]} onClick={(e) => { e.stopPropagation(); playAudioOnly(l); }}>♪</button>
-                    <button className={st === 'ok' ? '' : 'accent'} disabled={b === 'gen' || !!batch}
-                      onClick={(e) => { e.stopPropagation(); genOne(l); }}>{b === 'gen' ? '생성 중…' : st === 'ok' ? '재생성' : '생성'}</button>
-                    <button className="ghost" title="삭제" onClick={(e) => { e.stopPropagation(); removeLine(l.id); }}>✕</button>
+                    <div className="line-actions">
+                      <button title="편집본 위에서 미리보기" onClick={(e) => { e.stopPropagation(); previewLine(l); }}>▶ 영상</button>
+                      <button title="음성만 듣기" disabled={!tts[l.id]} onClick={(e) => { e.stopPropagation(); playAudioOnly(l); }}>♪</button>
+                      <button className={st === 'ok' ? '' : 'accent'} disabled={b === 'gen' || !!batch}
+                        onClick={(e) => { e.stopPropagation(); genOne(l); }}>{b === 'gen' ? '생성 중…' : st === 'ok' ? '재생성' : '생성'}</button>
+                      <button className="ghost" title="삭제" onClick={(e) => { e.stopPropagation(); removeLine(l.id); }}>✕</button>
+                    </div>
                   </div>
                   <div className="pair">
                     <label><span>자막</span>
@@ -1131,8 +1171,16 @@ export default function App({ project }) {
                     </label>
                   </div>
                   <div className="lf">
+                    <label className="line-voice">
+                      <span>보이스</span>
+                      <select aria-label={`${l.id} 대사 보이스`} value={script.voiceProfiles.some((p) => p.id === l.voiceProfileId) ? l.voiceProfileId : ''}
+                        onChange={(e) => updateLine(l.id, { voiceProfileId: e.target.value || undefined })}>
+                        <option value="">기본 · {defaultProfile.name || '이름 없는 보이스'}</option>
+                        {script.voiceProfiles.map((p) => <option key={p.id} value={p.id}>{p.name || '이름 없는 보이스'}</option>)}
+                      </select>
+                    </label>
                     <span className="muted">자막 {l.text.length}자 · 발음 {ttsText(l).length}자</span>
-                    {toneTags && sendText(l) !== ttsText(l) && <span className="tonebadge" title="보이스 탭의 기본 톤이 앞에 붙어 전송됩니다">+ {toneTags}</span>}
+                    {lineTone && sendText(l) !== ttsText(l) && <span className="tonebadge" title="선택한 보이스의 톤이 앞에 붙어 전송됩니다">+ {lineTone}</span>}
                     {warnings[l.id] && <span className="warn">⚠ {warnings[l.id]}</span>}
                     {b === 'err' && <span className="warn">생성 실패 — 로그 확인</span>}
                   </div>
@@ -1140,33 +1188,86 @@ export default function App({ project }) {
               );
             })}
           </ol>
+          </>) : (
+            <div className="lines-empty">
+              <h3>이 트랙에 아직 대사가 없습니다</h3>
+              <p>현재 재생 위치 <b>{fmt(editTime)}</b>에 첫 대사를 추가하세요.</p>
+              <button className="accent" onClick={addLine}>＋ 첫 대사 추가</button>
+            </div>
+          )}
 
-          <footer className="batch">
+          {(lines.length > 0 || batch) && <footer className="batch">
             {batch ? (
               <div className="progress"><div style={{ width: `${(batch.done / batch.total) * 100}%` }} />
                 <span>{batch.done} / {batch.total} 생성 중{batch.fail ? ` · 실패 ${batch.fail}` : ''}</span></div>
             ) : (
               <>
-                <button className="primary" onClick={() => runBatch('tab', true)}>이 영상 미생성·변경분 생성</button>
-                <button onClick={() => runBatch('tab', false)}>이 영상 전체 재생성</button>
+                <span className="batch-summary">생성 필요 <b>{todoChars.toLocaleString()}자</b></span>
+                <button className="primary" disabled={!todoChars} onClick={() => runBatch('tab', true)}>미생성·변경분 생성</button>
+                <button disabled={!generatableLines.length} onClick={() => runBatch('tab', false)}>전체 재생성</button>
               </>
             )}
-          </footer>
+          </footer>}
           </>)}
         </section>
 
-        {asstOpen && <Splitter axis="x" getStart={() => lay.asst} onDrag={(d, v) => setL('asst', clamp(v - d, 260, 900))} onReset={() => setL('asst', LAYOUT0.asst)} />}
+        {asstOpen && <Splitter axis="x" getStart={() => lay.asst} onDrag={(d, v) => setL('asst', clamp(v - d, 260, 900))} onReset={() => setL('asst', DEFAULT_LAYOUT.asst)} />}
         <aside className={`asst ${asstOpen ? '' : 'closed'}`}>
           <div className="asst-h">
-            {asstOpen && <><b>AI 어시스턴트</b><span className="muted sm">{{ lines: '대사', style: '자막 스타일', thumbs: '썸네일' }[side]} 작업 중</span><span className="grow" /></>}
+            {asstOpen && <><b>AI 어시스턴트</b><span className="muted sm">{{ lines: '대사', voice: '보이스', style: '자막 스타일', cards: '카드', thumbs: '썸네일', youtube: '업로드' }[side]} 작업 중</span><span className="grow" /></>}
             <button className="ghost" title={asstOpen ? '접기' : 'AI 어시스턴트 열기'} onClick={() => setAsstOpen((o) => !o)}>{asstOpen ? '⟩' : '✦'}</button>
           </div>
           <div className="asst-b" style={{ display: asstOpen ? undefined : 'none' }}>
-            <Agent keys={keys} ai={ai} mode={side} onOpenSettings={() => setModal('settings')} buildContext={buildContext} captureFrame={captureFrame}
+            <Agent key={agentThread} projectId={project.id} keys={keys} ai={ai} mode={side} activeReferences={activeReferences}
+              onOpenReferences={() => setModal('references')} msgs={threadState?.msgs || []} busy={!!threadState?.busy}
+              setMsgs={(update) => updateAgentThread((thread) => ({ msgs: update(thread.msgs || []) }))}
+              setBusy={(busy) => updateAgentThread(() => ({ busy }))}
+              onOpenSettings={() => setModal('settings')} buildContext={buildContext} captureFrame={captureFrame}
               applyOps={applyOps} annotate={annotate} describeOp={describeOp} say={say} />
           </div>
         </aside>
       </div>
+      <section className="timeline-dock" aria-labelledby="timeline-title" style={{ '--timeline-height': `${lay.timelineHeight}px` }}>
+        {lay.timelineOpen && <Splitter axis="y" controls="timeline-tracks" title="타임라인 높이 조절 · 더블클릭으로 초기화"
+          getStart={() => timelineTracksRef.current.querySelector('.mtl-inner').offsetHeight}
+          onDrag={(delta, height) => setL('timelineHeight', clamp(height - delta, DEFAULT_LAYOUT.timelineHeight, Math.floor(window.innerHeight * 0.45)))}
+          onReset={() => setL('timelineHeight', DEFAULT_LAYOUT.timelineHeight)} />}
+        <div className="timeline-dock-bar">
+          <div className="timeline-dock-title">
+            <button className="ghost sm" aria-expanded={lay.timelineOpen} aria-controls="timeline-tracks"
+              aria-label={lay.timelineOpen ? '타임라인 접기' : '타임라인 펼치기'} onClick={() => setL('timelineOpen', !lay.timelineOpen)}>{lay.timelineOpen ? '▾' : '▸'}</button>
+            <h2 id="timeline-title">타임라인</h2>
+          </div>
+          <div className="transport">
+            <button className="sm" onClick={() => seek(0)}>⏮ 처음</button>
+            <button className="primary sm" disabled={side === 'thumbs'} onClick={() => (playing ? stop() : startPlay(editTime))}>{playing ? '■ 정지' : '▶ 편집본 재생'}</button>
+            <span className="tc">{fmt(editTime)} <small>/ {fmt(tl.total)}</small></span>
+          </div>
+          <label className="field inline dock-volume"><span>원본 볼륨</span>
+            <input type="range" min="0" max="1" step="0.05" value={gameVol} onChange={(e) => setGameVol(+e.target.value)} />
+          </label>
+          <button className="ghost sm reset-layout" onClick={() => { setLay(DEFAULT_LAYOUT); setAsstOpen(false); }}>레이아웃 초기화</button>
+        </div>
+        <div id="timeline-tracks" ref={timelineTracksRef} hidden={!lay.timelineOpen}>
+          <Timeline tl={tl} lines={lines} trackName={tracks.length > 1 ? activeTrackName : null} durOf={durOf} statusOf={statusOf} warnings={warnings} playing={playing}
+            editTime={editTime} sel={sel} onSeek={seek} onSel={(l, keep) => {
+              setSel(l.id);
+              if (!keep) {
+                setSide('lines');
+                seek(Math.max(0, l.start - 0.5));
+              }
+            }}
+            onMove={moveLine} onDragStart={stop} onDrop={(id) => scrollToLine(id)}
+            chapters={meta?.chapters || []} insts={insts} thumbs={T.list.filter((d) => d.key === tab)}
+            onCardClick={(inst) => { setSide('cards'); C.setKind(inst.kind); focusCard(inst); }}
+            onCardDragStart={(inst) => { if (inst.kind === 'intro') C.beginGesture(); }}
+            onCardMove={(inst, a) => {
+              if (inst.kind === 'intro') C.updateCard('intro', { start: a }, { commit: false });
+              else if (inst.kind === 'chapter') setMeta((m) => ({ ...m, chapters: (m.chapters || []).map((c, i) => (i === inst.idx ? { ...c, cardAt: Math.round((a - (tl.parts[i]?.off ?? 0)) * 100) / 100 } : c)) }));
+            }}
+            onThumbClick={(d) => { setSide('thumbs'); T.select(d.id); }} />
+        </div>
+      </section>
       {modal === 'settings' && (
         <SettingsModal keys={keys} setKey={setKey} remember={remember} setRemember={setRemember} ai={ai} setAi={setAiCfg}
           onTestEl={() => loadVoices(true)} onClose={() => { setModal(null); setSetFocus(null); api('/api/font').then((f) => setFont(f.font)).catch(() => {}); }} say={say}
@@ -1183,43 +1284,3 @@ export default function App({ project }) {
     </div>
   );
 }
-
-function ToneEditor({ tone, onChange, sample }) {
-  const tags = parseTags(tone.tags);
-  const toggle = (tag) => onChange({ tags: (tags.includes(tag) ? tags.filter((t) => t !== tag) : [...tags, tag]).join('') });
-  return (
-    <div className="tone">
-      <div className="tone-h">
-        <label className="chk big"><input type="checkbox" checked={!!tone.enabled} onChange={(e) => onChange({ enabled: e.target.checked })} />
-          <b>기본 톤</b>&nbsp;모든 대사 생성 시 앞에 자동 적용</label>
-      </div>
-      <div className={`tone-b ${tone.enabled ? '' : 'off'}`}>
-        <div className="chips">
-          {TONE_PRESETS.map(([n, t]) => (
-            <button key={t} className={`chip ${tags.includes(t) ? 'on' : ''}`} onClick={() => toggle(t)} title={t}>{n}</button>
-          ))}
-        </div>
-        <input className="tagsin" value={tone.tags} placeholder="[narrator][calm]" spellCheck={false}
-          onChange={(e) => onChange({ tags: e.target.value })} />
-        <label className="chk"><input type="checkbox" checked={!!tone.override} onChange={(e) => onChange({ override: e.target.checked })} />
-          줄 발음이 태그로 시작하면 그 줄은 기본 톤 대신 자체 태그 사용</label>
-        {tone.enabled && sample && <div className="tone-pv"><span>전송 예</span><code>{sample}</code></div>}
-        <p className="hint">태그는 음성에 읽히지 않고 말투만 지시합니다(자막에도 안 나옴). 영어 지시어가 가장 안정적이며, 톤을 바꾸면 기존 음성은 ‘변경’으로 표시돼 재생성 대상이 됩니다.</p>
-      </div>
-    </div>
-  );
-}
-
-function Section({ id, title, summary, className = '', defaultOpen = false, children }) {
-  const [open, setOpen] = useState(() => ls.get(`zk.sec.${id}`, defaultOpen ? '1' : '0') === '1');
-  useEffect(() => { ls.set(`zk.sec.${id}`, open ? '1' : '0'); }, [id, open]);
-  return (
-    <div className={`panel sec ${className} ${open ? 'open' : ''}`}>
-      <button className="sechead" onClick={() => setOpen((o) => !o)}>
-        <span className="chev">{open ? '▾' : '▸'}</span><h3>{title}</h3><span className="secsum">{summary}</span>
-      </button>
-      {open && <div className="secbody">{children}</div>}
-    </div>
-  );
-}
-
