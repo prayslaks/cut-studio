@@ -3,3 +3,14 @@ node_modules/
 *.tgz
 studio.config.json
 projects.json
+.env
+.env.*
+!.env.example
+/references.json
+/references.json.*.tmp
+/script.json
+/script.*.json
+/tts/
+/thumbs/
+/fonts/
+/output/
